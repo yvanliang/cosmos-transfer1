@@ -13,13 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import attrs
-
-from cosmos_transfer1.diffusion.conditioner import (
-    FrameRepeatAttr,
-    VideoConditionerWithCtrl,
-    ViewConditionedVideoConditionerWithCtrl,
-)
+from cosmos_transfer1.diffusion.conditioner import VideoConditionerWithCtrl
 from cosmos_transfer1.diffusion.config.base.conditioner import (
     FPSConfig,
     ImageSizeConfig,
@@ -79,13 +73,6 @@ CTRL_AUG_KEYS = {
 }
 
 
-@attrs.define(slots=False)
-class FrameRepeatConfig:
-    obj: LazyDict = L(FrameRepeatAttr)()
-    dropout_rate: float = 0.0
-    input_key: str = "frame_repeat"
-
-
 BaseVideoConditionerWithCtrlConfig: LazyDict = L(VideoConditionerWithCtrl)(
     text=TextConfig(),
 )
@@ -97,14 +84,4 @@ VideoConditionerFpsSizePaddingWithCtrlConfig: LazyDict = L(VideoConditionerWithC
     image_size=ImageSizeConfig(),
     padding_mask=PaddingMaskConfig(),
     video_cond_bool=VideoCondBoolConfig(),
-)
-
-ViewConditionedVideoConditionerFpsSizePaddingWithCtrlConfig: LazyDict = L(ViewConditionedVideoConditionerWithCtrl)(
-    text=TextConfig(),
-    fps=FPSConfig(),
-    num_frames=NumFramesConfig(),
-    image_size=ImageSizeConfig(),
-    padding_mask=PaddingMaskConfig(),
-    video_cond_bool=VideoCondBoolConfig(),
-    frame_repeat=FrameRepeatConfig(),
 )
