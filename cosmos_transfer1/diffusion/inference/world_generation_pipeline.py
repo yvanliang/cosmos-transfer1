@@ -336,6 +336,7 @@ class DiffusionControl2WorldGenerationPipeline(BaseWorldGenerationPipeline):
         else:
             for _, spec in self.control_inputs.items():
                 log.info(f"Loading ctrl model from ckpt_path: {spec['ckpt_path']}")
+
                 if os.path.exists(spec["ckpt_path"]):
                     net_state_dict = torch.load(spec["ckpt_path"], map_location="cpu", weights_only=False)
                 else:
