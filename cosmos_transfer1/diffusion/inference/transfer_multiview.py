@@ -21,6 +21,7 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Workaround to suppress MP warning
 
 import sys
+from io import BytesIO
 
 import torch
 

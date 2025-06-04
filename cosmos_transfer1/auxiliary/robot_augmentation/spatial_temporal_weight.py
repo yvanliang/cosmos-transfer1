@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+from collections import defaultdict
 
 import cv2
 import numpy as np
