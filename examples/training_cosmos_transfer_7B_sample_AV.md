@@ -13,10 +13,10 @@ We support the following Cosmos-Transfer1-Sample-AV models for pre-training and 
 |-------------------------------------------------------------------|--------------|----------------------------------------|
 | Cosmos-Transfer1-7B-Sample-AV [Lidar]                             | **Supported**| 8 NVIDIA GPUs*                         |
 | Cosmos-Transfer1-7B-Sample-AV [HDMap]                             | **Supported**| 8 NVIDIA GPUs*                         |
-| Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/t2w_model [Lidar] | **Supported**| 8 NVIDIA GPUs*                         |
-| Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/t2w_model [HDMap] | **Supported**| 8 NVIDIA GPUs*                         |
-| Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/v2w_model [Lidar] | **Supported**| 8 NVIDIA GPUs*                         |
-| Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/v2w_model [HDMap] | **Supported**| 8 NVIDIA GPUs*                         |
+| Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/t2w_model [Lidar] | **Supported**| 8 NVIDIA GPUs*                         |
+| Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/t2w_model [HDMap] | **Supported**| 8 NVIDIA GPUs*                         |
+| Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/v2w_model [Lidar] | **Supported**| 8 NVIDIA GPUs*                         |
+| Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/v2w_model [HDMap] | **Supported**| 8 NVIDIA GPUs*                         |
 
 **\*** 80GB GPU memory required for training. `H100-80GB` or `A100-80GB` GPUs are recommended.
 
@@ -67,7 +67,7 @@ checkpoints/
 │   │   ├── hdmap_control.pt
 │   │   └── lidar_control.pt
 │   │
-│   ├── Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/
+│   ├── Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/
 │   │   ├── v2w_base_model.pt
 │   │   ├── v2w_hdmap_control.pt
 │   │   ├── v2w_lidar_control.pt
@@ -125,9 +125,9 @@ PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos
 # Example: for LidarControl checkpoint splitting for post-train.
 PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV/t2w_lidar_control.pt
 # Example: for SingleToMultiView, the base model checkpoint is different
-PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/t2w_base_model.pt
+PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/t2w_base_model.pt
 # Example: for SingleToMultiView HDMapControl
-PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/t2w_hdmap_control.pt
+PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView/t2w_hdmap_control.pt
 
 ```
 This will generate the TP checkpoints under `checkpoints/checkpoints_tp/*_mp_*.pt`, which we load in the training below.
@@ -161,7 +161,7 @@ Now we can start a real training job! Removing the `--dryrun` and set `--nproc_p
 ```bash
 torchrun --nproc_per_node=8 -m cosmos_transfer1.diffusion.training.train --config=cosmos_transfer1/diffusion/config/config_train.py -- experiment=CTRL_7Bv1pt3_t2w_121frames_control_input_lidar_block3_pretrain
 ```
-#### 4.b Launch Training of Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV
+#### 4.b Launch Training of Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView
 In this example, we instead launch a training run of the SingleToMultiView model with HDMap condition:
 
 ```bash

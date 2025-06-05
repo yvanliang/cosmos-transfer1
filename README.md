@@ -22,7 +22,7 @@ Cosmos-Transfer1 includes the following:
 - [2025/05] **Cosmos AV Single2MultiView** is available! Now you can create dynamic, multi-view clips from just one video. Try it out and tell us what you think!  
     - [Inference guide](examples/inference_cosmos_transfer1_7b_sample_av_single2multiview.md)  
     - [Build your own or PyTorch post-training](examples/training_cosmos_transfer_7B_sample_AV.md)  
-    - [Hugging Face model](https://huggingface.co/nvidia/Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV)
+    - [Hugging Face model](https://huggingface.co/nvidia/Cosmos-Transfer1-7B-Sample-AV-SingleToMultiView)
 - [2025/04] [Post training](README.md#post-train-pre-trained-cosmos-transfer1-models) is available! Now you can customize Transfer1 models in your own way. Please try it out and we look forward to your feedback.
 
 ## Example Model Behavior
