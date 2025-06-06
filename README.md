@@ -75,7 +75,12 @@ Please refer to [INSTALL.md](INSTALL.md) for general instructions on environment
 
 ### Workflow
 
-* Scene augmentation for robotic manipulation: Coming soon
+*[Robotics Augmentation Workflow](/cosmos_transfer1/auxiliary/robot_augmentation/README.md): Scene augmentation for robotic manipulation, mapping one robotics synthetic example to multiple realistic examples
+
+
+<video src="https://github.com/user-attachments/assets/6dee15f5-9d8b-469a-a92a-3419cb466d44">
+  Your browser does not support the video tag.
+</video>
 
 ## Cosmos-Transfer1 Models
 
