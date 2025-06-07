@@ -580,7 +580,7 @@ class DiffusionControl2WorldGenerationPipeline(BaseWorldGenerationPipeline):
                 prev_frames_patched = split_video_into_patches(
                     prev_frames, control_input.shape[-2], control_input.shape[-1]
                 )
-                input_frames = prev_frames_patched.bfloat16() / 255.0 * 2 - 1
+                input_frames = prev_frames_patched.bfloat16().cuda() / 255.0 * 2 - 1
                 condition_latent = self.model.encode(input_frames).contiguous()
 
             # Generate video frames for this clip (batched)
