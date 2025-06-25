@@ -270,6 +270,9 @@ def demo(cfg, control_inputs):
         prompts = [{"prompt": cfg.prompt, "visual_input": cfg.input_video_path}]
 
     batch_size = cfg.batch_size if hasattr(cfg, "batch_size") else 1
+    if any("upscale" in control_input for control_input in control_inputs) and batch_size > 1:
+        batch_size = 1
+        log.info("Setting batch_size=1 as upscale does not support batch generation")
     os.makedirs(cfg.video_save_folder, exist_ok=True)
     for batch_start in range(0, len(prompts), batch_size):
         # Get current batch
