@@ -2,11 +2,11 @@
     "hdmap": {
         "control_weight": 1,
         "input_control": [
-            "assets/sample_av_mv_input_hdmap_front.mp4",
-            "assets/sample_av_mv_input_hdmap_front_left.mp4",
-            "assets/sample_av_mv_input_hdmap_front_right.mp4",
-            "assets/sample_av_mv_input_hdmap_rear_left.mp4",
-            "assets/sample_av_mv_input_hdmap_rear_right.mp4"
+            "/data/lyy_dataset/waymo_transfer/training/hdmap/pinhole_front/10017090168044687777_6380_000_6400_000_0.mp4",
+            "/data/lyy_dataset/waymo_transfer/training/hdmap/pinhole_front_left/10017090168044687777_6380_000_6400_000_0.mp4",
+            "/data/lyy_dataset/waymo_transfer/training/hdmap/pinhole_front_right/10017090168044687777_6380_000_6400_000_0.mp4",
+            "/data/lyy_dataset/waymo_transfer/training/hdmap/pinhole_side_left/10017090168044687777_6380_000_6400_000_0.mp4",
+            "/data/lyy_dataset/waymo_transfer/training/hdmap/pinhole_side_right/10017090168044687777_6380_000_6400_000_0.mp4"
         ],
         "ckpt_path": "nvidia/Cosmos-Transfer1-7B-SingleToMultiView-Sample-AV/t2w_hdmap_control_waymo.pt"
     }

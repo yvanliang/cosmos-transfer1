@@ -52,7 +52,7 @@ num_blocks = 28
 num_frames = 57
 num_control_blocks = 3
 ckpt_root = "checkpoints/"
-data_root = "datasets/waymo_transfer/"
+data_root = "/data/lyy_dataset/waymo_transfer/training"
 
 t2w_mv_model_names = {
     "hdmap": SV2MV_t2w_HDMAP2WORLD_CONTROLNET_7B_CHECKPOINT_PATH,
@@ -131,7 +131,7 @@ def make_ctrlnet_config(
                 {"override /hint_key": hint_key},
                 {"override /callbacks": "basic"},
                 {"override /checkpoint": "local"},
-                {"override /ckpt_klass": "fast_tp"},
+                {"override /ckpt_klass": "fsdp"},
                 "_self_",
             ],
             job=dict(group="CTRL_7Bv1_sampleAV", project=job_project, name=job_name),
@@ -145,14 +145,14 @@ def make_ctrlnet_config(
                 load_path=pretrain_model_path,
                 # Modify load_path as needed if you do post-training (fine-tuning). If training from scratch, leave it empty.
                 broadcast_via_filesystem=True,
-                save_iter=1000,
+                save_iter=100,
                 load_training_state=False,
                 strict_resume=False,
                 keys_not_to_resume=[],
             ),
             trainer=dict(
-                distributed_parallelism="ddp",
-                logging_iter=200,
+                distributed_parallelism="fsdp",
+                logging_iter=50,
                 max_iter=999_999_999,
                 callbacks=dict(
                     iter_speed=dict(hit_thres=5),
@@ -160,11 +160,23 @@ def make_ctrlnet_config(
                 timestamp_seed=True,  # important for dataver dataloader!!!
             ),
             model_parallel=dict(
-                tensor_model_parallel_size=8,
+                tensor_model_parallel_size=4,
                 sequence_parallel=True,
+                bf16=True,
+                enable_autocast=True,
+                autocast_dtype="bf16",
+                params_dtype="bf16",
+                cpu_offloading_weights=False,
+                cpu_offloading_activations=False,
             ),
             model=dict(
-                fsdp_enabled=False,
+                fsdp_enabled=True,
+                fsdp=dict(
+                    checkpoint=True,
+                    sharding_group_size=1,
+                    sharding_strategy="full",
+                ),
+                ema=dict(enabled=False),
                 n_views=3,
                 context_parallel_size=1,
                 loss_reduce="mean",

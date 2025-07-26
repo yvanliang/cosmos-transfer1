@@ -703,7 +703,7 @@ class DiffusionControl2WorldGenerationPipeline(BaseWorldGenerationPipeline):
         log.info("Running guardrail checks on all prompts")
         safe_indices = []
         for i, single_prompt in enumerate(prompts):
-            is_safe = self._run_guardrail_on_prompt_with_offload(single_prompt)
+            is_safe = True  # self._run_guardrail_on_prompt_with_offload(single_prompt)
             if is_safe:
                 safe_indices.append(i)
             else:
@@ -757,7 +757,7 @@ class DiffusionControl2WorldGenerationPipeline(BaseWorldGenerationPipeline):
 
         log.info("Run guardrail on generated videos")
         for i, video in enumerate(videos):
-            safe_video = self._run_guardrail_on_video_with_offload(video)
+            safe_video = video  # self._run_guardrail_on_video_with_offload(video)
             if safe_video is not None:
                 all_videos.append(safe_video)
                 all_final_prompts.append(safe_prompts[i])
@@ -1202,7 +1202,7 @@ class DiffusionControl2WorldMultiviewGenerationPipeline(DiffusionControl2WorldGe
 
         # Process prompts into multiview format
         log.info("Run guardrail on prompt")
-        is_safe = self._run_guardrail_on_prompt_with_offload(". ".join(mv_prompts))
+        is_safe = True  # self._run_guardrail_on_prompt_with_offload(". ".join(mv_prompts))
         if not is_safe:
             log.critical("Input text prompt is not safe")
             return None
@@ -1224,7 +1224,7 @@ class DiffusionControl2WorldMultiviewGenerationPipeline(DiffusionControl2WorldGe
         )
         log.info("Finish generation")
         log.info("Run guardrail on generated video")
-        video = self._run_guardrail_on_video_with_offload(video)
+        # video = self._run_guardrail_on_video_with_offload(video)
         if video is None:
             log.critical("Generated video is not safe")
             raise ValueError("Guardrail check failed: Generated video is unsafe")

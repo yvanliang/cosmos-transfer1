@@ -27,6 +27,7 @@ from cosmos_transfer1.checkpointer.fsdp_optim_fix import scatter_full_optim_stat
 from cosmos_transfer1.utils import callback, distributed, log, misc
 from cosmos_transfer1.utils.config import CheckpointConfig, JobConfig
 from cosmos_transfer1.utils.model import Model
+from megatron.core import parallel_state
 
 
 class FSDPCheckpointer:
@@ -80,39 +81,32 @@ class FSDPCheckpointer:
         if ema_id > 0:
             assert is_ema, "ema_id should be used with is_ema=True"
         checkpoint_path, _ = self._load_ckpt_file_during_init()
-        if checkpoint_path is not None:
-            tag = "reg" if not is_ema else "ema"
-            default_checkpoint_path = checkpoint_path.replace(".pt", f"_{tag}_model.pt")
-            if not os.path.exists(default_checkpoint_path):
-                default_checkpoint_path = checkpoint_path  # starting from the release checkpoint
-                log.warning(f"is_ema={is_ema} model is not found. Loading from {default_checkpoint_path}")
-            if tag == "ema" and ema_id > 0:
-                _checkpoint_path = checkpoint_path.replace(".pt", f"_RANK{ema_id}.pt")
-                _checkpoint_path = _checkpoint_path.replace(".pt", f"_{tag}_model.pt")
-                if self._check_checkpoint_exists(_checkpoint_path, is_raise=False):
-                    default_checkpoint_path = _checkpoint_path
-                else:
-                    print(
-                        f"{distributed.get_rank()}: Checkpoint not found: {_checkpoint_path} "
-                        f"(fallback to {default_checkpoint_path})"
-                    )
-            checkpoint_path = default_checkpoint_path
-            self._check_checkpoint_exists(checkpoint_path)
+        checkpoint_path = checkpoint_path.replace(".pt", "_model_mp_*.pt")
 
-            log.info(f"Loading checkpoint (local): {checkpoint_path}")
-            state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage, weights_only=False)
-            log.success(f"Complete loading checkpoint (local): {checkpoint_path}")
-            log.info("- Loading the model...")
-            if self.strict_resume:
-                log.info(model.load_state_dict(state_dict, strict=self.strict_resume))
+        if "*" in checkpoint_path:
+            # there might be better ways to decide if it's a converted tp checkpoint
+            mp_rank = parallel_state.get_model_parallel_group().rank()
+            checkpoint_path = checkpoint_path.replace("*", f"{mp_rank}")
+
+        if checkpoint_path:
+            log.info(f"Loading ctrl model checkpoint (local): {checkpoint_path}", False)
+            state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+            log.success(f"Complete loading ctrl model checkpoint (local): {checkpoint_path}", False)
+
+            if "model" in state_dict:
+                # Copy the ctrl model weights from reg model.
+                # log.warning("Using non-EMA ctrl model", False)
+                base_state_dict = state_dict["model"]
             else:
-                log.critical("\t Using non-strict model")
-                from cosmos_transfer1.diffusion.inference.inference_utils import non_strict_load_model
+                # log.info("Loading from an EMA only model", False)
+                base_state_dict = state_dict
+            try:
+                model.load_state_dict(base_state_dict, strict=False)
+            except Exception:
+                log.critical("load model in non-strict mode", False)
 
-                log.info(non_strict_load_model(model, state_dict))
-            log.info("-finish model loading")
-        else:
-            log.info(f"is_ema={is_ema} model is not found and loaded.")
+                from cosmos_transfer1.diffusion.inference.inference_utils import non_strict_load_model
+                log.critical(non_strict_load_model(model, base_state_dict))
 
     @misc.timer("FSDP.load_optim_scheduler_during_init")
     def load_optim_scheduler_during_init(self, fsdp_model, optimizer, scheduler):

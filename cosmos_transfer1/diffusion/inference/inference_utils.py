@@ -229,7 +229,23 @@ def load_network_model(model: DiffusionT2WModel, ckpt_path: str):
         with skip_init_linear():
             model.set_up_model()
         net_state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)  # , weights_only=True)
-        non_strict_load_model(model.model, net_state_dict)
+        load_result = non_strict_load_model(model.model, net_state_dict)
+        if len(load_result.incorrect_shapes) > 0:
+            log.critical(
+                f"Some keys in \"{ckpt_path}\" have incorrect shapes: {load_result.incorrect_shapes}. "
+            )
+        elif len(load_result.missing_keys) > 0:
+            log.critical(
+                f"Some keys in \"{ckpt_path}\" are missing: {load_result.missing_keys}. "
+            )
+        elif len(load_result.unexpected_keys) > 0:
+            log.warning(
+                f"Some keys in \"{ckpt_path}\" are unexpected: {load_result.unexpected_keys}. "
+            )
+        else:
+            log.success(
+                f"Load model weights from {ckpt_path} with all keys matched successfully."
+            )
     else:
         model.set_up_model()
     model.cuda()

@@ -405,7 +405,7 @@ class AVTransferDataset(ExampleTransferDataset):
                         video_name_emb = video_name
 
                     if self.load_mv_emb or view_key == "pinhole_front":
-                        t5_embedding_path = os.path.join(self.dataset_dir, "t5_xxl", view_key, f"{video_name_emb}.pkl")
+                        t5_embedding_path = os.path.join(self.dataset_dir, "t5_xxl", view_key, f"{video_name_emb}_0.pkl")
                         with open(t5_embedding_path, "rb") as f:
                             t5_embedding = pickle.load(f)[0]
                         if self.load_mv_emb:
@@ -414,7 +414,7 @@ class AVTransferDataset(ExampleTransferDataset):
                         # use camera prompt
                         t5_embedding = self.prefix_t5_embeddings[view_key]
 
-                    t5_embedding = torch.from_numpy(t5_embedding)
+                    t5_embedding = torch.from_numpy(t5_embedding)[0]
                     t5_mask = torch.ones(t5_embedding.shape[0], dtype=torch.int64)
                     if t5_embedding.shape[0] < 512:
                         t5_embedding = torch.cat([t5_embedding, torch.zeros(512 - t5_embedding.shape[0], 1024)], dim=0)

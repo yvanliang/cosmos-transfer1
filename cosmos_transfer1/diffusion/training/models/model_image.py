@@ -22,11 +22,17 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from megatron.core import parallel_state
+import hashlib
+from torch.distributed import get_process_group_ranks, new_group
+import os
+import socket
+import torch.distributed as dist
 from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import ShardingStrategy, StateDictType
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.nn.modules.module import _IncompatibleKeys
+import transformer_engine as te
 
 from cosmos_transfer1.diffusion.diffusion.modules.denoiser_scaling import EDMScaling
 from cosmos_transfer1.diffusion.diffusion.modules.res_sampler import COMMON_SOLVER_OPTIONS, Sampler
@@ -678,20 +684,126 @@ def diffusion_fsdp_class_decorator(base_class: Type[T]) -> Type[T]:
             }[config.fsdp.sharding_strategy]
             log.critical(f"Using {strategy} sharding strategy for FSDP")
 
+            # Build DP-scoped process groups so FSDP never crosses TP
+            # dp_group: includes only data-parallel ranks (excludes TP/CP)
+            dp_group = parallel_state.get_data_parallel_group(with_context_parallel=False)
+            dp_ranks = sorted(get_process_group_ranks(dp_group))
+            dp_size = len(dp_ranks)
+            fsdp_process_group = dp_group
+
             if config.fsdp.sharding_strategy == "hybrid":
                 sharding_group_size = getattr(config.fsdp, "sharding_group_size", 8)
+                # Within each DP group, create a sharding subgroup of size sharding_group_size.
+                if dp_size % sharding_group_size != 0:
+                    raise ValueError(
+                        f"DP group size {dp_size} must be divisible by sharding_group_size {sharding_group_size}."
+                    )
+                # Determine current shard ranks inside the DP group
+                rank = distributed.get_rank()
+                idx_in_dp = dp_ranks.index(rank)
+                shard_idx = idx_in_dp // sharding_group_size
+                shard_start = shard_idx * sharding_group_size
+                shard_ranks = dp_ranks[shard_start : shard_start + sharding_group_size]
+                dp_shard_group = new_group(ranks=shard_ranks)
+                # For HYBRID_SHARD in torch FSDP: (shard_group, replicate_group)
+                fsdp_process_group = (dp_shard_group, dp_group)
                 device_mesh = hsdp_device_mesh(
                     sharding_group_size=sharding_group_size,
                 )
-                shard_group = device_mesh.get_group(mesh_dim="shard")
-                replicate_group = device_mesh.get_group(mesh_dim="replicate")
-                fsdp_process_group = (shard_group, replicate_group)
             else:
                 device_mesh = hsdp_device_mesh(
                     sharding_group_size=distributed.get_world_size(),
                 )
-                shard_group = device_mesh.get_group(mesh_dim="shard")
-                fsdp_process_group = shard_group
+
+            # ==== Print parallel mesh (TP / DP / FSDP shard) ====
+            try:
+                world_size = distributed.get_world_size()
+                rank = distributed.get_rank()
+                tp_size = parallel_state.get_tensor_model_parallel_world_size() if parallel_state.is_initialized() else 1
+                dp_size = len(dp_ranks)
+                shard_size = sharding_group_size if config.fsdp.sharding_strategy == "hybrid" else None
+
+                # Build per-rank summary (hostname/local_rank and group memberships for current rank)
+                host = socket.gethostname()
+                local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
+                tp_group = parallel_state.get_tensor_model_parallel_group() if tp_size > 1 else None
+                tp_ranks_cur = get_process_group_ranks(tp_group) if tp_group is not None else [rank]
+                dp_ranks_cur = dp_ranks
+                shard_ranks_cur = shard_ranks if (config.fsdp.sharding_strategy == "hybrid") else None
+
+                my_info = dict(
+                    rank=rank,
+                    host=host,
+                    local_rank=local_rank,
+                    tp_ranks=sorted(tp_ranks_cur),
+                    dp_ranks=sorted(dp_ranks_cur),
+                    shard_ranks=sorted(shard_ranks_cur) if shard_ranks_cur is not None else None,
+                )
+                gathered = [None for _ in range(world_size)]
+                dist.all_gather_object(gathered, my_info)
+
+                if distributed.is_rank0():
+                    # Map host -> node index
+                    hosts = [gi["host"] for gi in gathered]
+                    host_to_nid = {}
+                    for h in hosts:
+                        if h not in host_to_nid:
+                            host_to_nid[h] = len(host_to_nid)
+
+                    # Helper: label for a rank
+                    rank_to_label = {}
+                    rank_to_local = {}
+                    for gi in gathered:
+                        nid = host_to_nid[gi["host"]]
+                        rank_to_label[gi["rank"]] = f"n{nid}g{gi['local_rank']}"
+                        rank_to_local[gi["rank"]] = gi["local_rank"]
+
+                    # Collect unique TP groups
+                    tp_groups = {}
+                    for gi in gathered:
+                        key = tuple(gi["tp_ranks"])
+                        tp_groups[key] = key
+
+                    # Collect unique DP groups
+                    dp_groups = {}
+                    for gi in gathered:
+                        key = tuple(gi["dp_ranks"])
+                        dp_groups[key] = key
+
+                    # Collect unique shard groups (only hybrid)
+                    shard_groups = {}
+                    if config.fsdp.sharding_strategy == "hybrid":
+                        for gi in gathered:
+                            if gi["shard_ranks"] is not None:
+                                key = tuple(gi["shard_ranks"])
+                                shard_groups[key] = key
+
+                    log.critical("==== Parallel Mesh Topology ====")
+                    log.critical(
+                        f"World={world_size} | TP={tp_size} | DP={dp_size} | HYBRID shard_size={shard_size if shard_size else '-'}"
+                    )
+
+                    # Print TP groups
+                    log.critical("-- TP groups (labels are n<node>g<gpu>):")
+                    for idx, grp in enumerate(sorted(tp_groups.keys(), key=lambda x: min(x))):
+                        labels = [rank_to_label[r] for r in grp]
+                        log.critical(f"TP#{idx}: ranks={list(grp)} labels={labels}")
+
+                    # Print DP replicate groups
+                    log.critical("-- DP (FSDP replicate) groups:")
+                    for idx, grp in enumerate(sorted(dp_groups.keys(), key=lambda x: min(x))):
+                        labels = [rank_to_label[r] for r in grp]
+                        log.critical(f"DP#{idx}: ranks={list(grp)} labels={labels}")
+
+                    # Print shard groups if hybrid
+                    if shard_groups:
+                        log.critical("-- FSDP shard groups within DP:")
+                        for idx, grp in enumerate(sorted(shard_groups.keys(), key=lambda x: (min(x), len(x)))):
+                            labels = [rank_to_label[r] for r in grp]
+                            log.critical(f"Shard#{idx}: ranks={list(grp)} labels={labels}")
+                    log.critical("==== End of Mesh ====")
+            except Exception as e:
+                log.warning(f"Mesh debug print failed: {e}")
 
             # We piggyback the `device_mesh` to megatron-core's `parallel_state` for global access.
             # This is not megatron-core's original API.
@@ -729,16 +841,17 @@ def diffusion_fsdp_class_decorator(base_class: Type[T]) -> Type[T]:
                 with misc.timer("Creating PyTorch model and loading weights for ema"):
                     model_ema = self.build_model().float()
                     model_ema.cuda().eval().requires_grad_(False)
-                    if distributed.get_rank() == 0:
-                        # only load model in rank0 to reduce network traffic
+                    dp_ranks = sorted(get_process_group_ranks(dp_group))
+                    dp_src = dp_ranks[0]
+                    if distributed.get_rank() == dp_src:
                         self.fsdp_checkpointer.load_model_during_init(model_ema, is_ema=True)
                     # sync ema model weights from rank0
                     with misc.timer("Sync model states for EMA model"):
-                        #! this is IMPORTANT, see the following comment about regular model for details
-                        #! we broadcast the ema model first, since it is fp32 and costs more memory
-                        distributed.sync_model_states(model_ema, device_mesh.get_group(mesh_dim="shard"))
-                        torch.cuda.empty_cache()
-                        distributed.sync_model_states(model_ema, device_mesh.get_group(mesh_dim="replicate"))
+                        if dist.is_initialized():
+                            for p in model_ema.parameters():
+                                dist.broadcast(p.data, src=dp_src, group=dp_group)
+                            for b in model_ema.buffers():
+                                dist.broadcast(b.data, src=dp_src, group=dp_group)
                         torch.cuda.empty_cache()
                     # for ema model with dfiferent rate, we download the model when necessary
                     if shard_idx == 0 and replica_idx > 0 and replica_idx < config.ema.num:
@@ -753,12 +866,13 @@ def diffusion_fsdp_class_decorator(base_class: Type[T]) -> Type[T]:
                 with misc.timer("Creating FSDP model for EMA model"):
                     self.model_ema = FSDP(
                         model_ema,
-                        sync_module_states=True,  # it can reduce network traffic by only loading model in rank0 and sync
-                        process_group=device_mesh.get_group(mesh_dim=1),
-                        sharding_strategy=ShardingStrategy.FULL_SHARD,
+                        sync_module_states=False,
+                        process_group=fsdp_process_group,
+                        sharding_strategy=strategy,
                         auto_wrap_policy=get_wrap_policy(model_ema),
                         device_id=torch.cuda.current_device(),
                         limit_all_gathers=True,
+                        use_orig_params=True,
                     )
 
                 # extra ema model upate logic to the model
@@ -778,9 +892,8 @@ def diffusion_fsdp_class_decorator(base_class: Type[T]) -> Type[T]:
             with misc.timer("Creating PyTorch model and loading weights for regular model"):
                 model = self.build_model().cuda().to(**self.tensor_kwargs)
 
-                if distributed.get_rank() == 0:
-                    # only load model in rank0 to reduce network traffic and sync later
-                    self.fsdp_checkpointer.load_model_during_init(model, is_ema=False)
+                # load model weights on every rank, so no need to sync_model_states
+                self.fsdp_checkpointer.load_model_during_init(model, is_ema=False)
 
                 #! overwrite the forward method so that it will invoke the FSDP-specific pre- and post-forward sharding logic
                 model.forward = super().training_step
@@ -789,21 +902,95 @@ def diffusion_fsdp_class_decorator(base_class: Type[T]) -> Type[T]:
                 #! without it, peak mem : reg_model + ema_model + FSDP overhead + nccl communication initialization overhead
                 #! with it, peak men: reg_model + ema_model + FSDP overhead
                 #! it is tricky, but it works!
-                with misc.timer("Sync model states for regular model"):
-                    distributed.sync_model_states(model, device_mesh.get_group(mesh_dim="shard"))
-                    torch.cuda.empty_cache()
-                    distributed.sync_model_states(model, device_mesh.get_group(mesh_dim="replicate"))
-                    torch.cuda.empty_cache()
+                # with misc.timer("Sync model states for regular model"):
+                #     distributed.sync_model_states(model, device_mesh.get_group(mesh_dim="shard"))
+                #     torch.cuda.empty_cache()
+                #     distributed.sync_model_states(model, device_mesh.get_group(mesh_dim="replicate"))
+                #     torch.cuda.empty_cache()
 
                 with misc.timer("Creating FSDP model"):
                     self.model = FSDP(
                         model.to(**self.tensor_kwargs),
-                        sync_module_states=True,  # it can reduce network traffic by only loading model in rank0 and sync
+                        sync_module_states=False,
                         sharding_strategy=strategy,
                         auto_wrap_policy=get_wrap_policy(model),
                         process_group=fsdp_process_group,
                         limit_all_gathers=True,
+                        use_orig_params=True,
                     )
+
+                    # Post-FSDP wrap TP debug: print up to 5 watched tensors across TP ranks
+                    # try:
+                    #     tp_enabled = parallel_state.is_initialized() and parallel_state.get_tensor_model_parallel_world_size() > 1
+                    # except Exception:
+                    #     tp_enabled = False
+                    # if tp_enabled:
+                    #     tp_group = parallel_state.get_tensor_model_parallel_group()
+                    #     tp_world_size = parallel_state.get_tensor_model_parallel_world_size()
+                    #     with FSDP.summon_full_params(self.model):
+                    #         printed = 0
+                    #         tp_rank = parallel_state.get_tensor_model_parallel_rank()
+                    #         for module_name, module in self.model.named_modules():
+                    #             # if isinstance(module, te.pytorch.Linear) and hasattr(module, "parallel_mode"):
+                    #             #     module.weight.data.add_(tp_rank * 1e-4)
+                    #             if printed >= 5:
+                    #                 break
+                    #             if isinstance(module, te.pytorch.Linear) and hasattr(module, "parallel_mode"):
+                    #                 watch = module_name.endswith(".attn.to_q.0") or module_name.endswith(".attn.to_out.0")
+                    #                 if not watch:
+                    #                     continue
+                    #                 local_cpu = module.weight.detach().float().cpu()
+                    #                 sig = hashlib.md5(local_cpu.numpy().tobytes()).hexdigest()[:8]
+                    #                 payload = {
+                    #                     "name": module_name,
+                    #                     "mode": module.parallel_mode,
+                    #                     "shape": list(local_cpu.shape),
+                    #                     "mean": float(local_cpu.mean()),
+                    #                     "std": float(local_cpu.std()),
+                    #                     "hash8": sig,
+                    #                     "tp_rank": parallel_state.get_tensor_model_parallel_rank(),
+                    #                     "rank": dist.get_rank(),
+                    #                 }
+                    #                 gathered_objs = [None for _ in range(tp_world_size)]
+                    #                 dist.all_gather_object(gathered_objs, payload, group=tp_group)
+                    #                 if parallel_state.get_tensor_model_parallel_rank() == 0:
+                    #                     log.critical(f"[TP DEBUG][POST-FSDP-WRAP] {module_name} parallel_mode={module.parallel_mode} :: {gathered_objs}")
+                    #                 printed += 1
+
+                    # Optional EMA init verification
+                    # Compares a few watched layers between regular model and EMA model right after initialization.
+                    # try:
+                    #     dp_ranks = sorted(get_process_group_ranks(dp_group))
+                    #     dp_src = dp_ranks[0]
+                    #     if dist.get_rank() == dp_src:
+                    #         with FSDP.summon_full_params(self.model), FSDP.summon_full_params(self.model_ema):
+                    #             printed = 0
+                    #             for module_name, module in self.model.named_modules():
+                    #                 if printed >= 5:
+                    #                     break
+                    #                 if isinstance(module, te.pytorch.Linear) and hasattr(module, "weight"):
+                    #                     # Try to locate the counterpart in EMA model via the same hierarchical name
+                    #                     try:
+                    #                         ema_module = self.model_ema.get_submodule(module_name)
+                    #                     except Exception:
+                    #                         continue
+                    #                     if not hasattr(ema_module, "weight"):
+                    #                         continue
+                    #                     # Only watch selected layers to reduce log spam
+                    #                     watch = module_name.endswith(".attn.to_q.0") or module_name.endswith(
+                    #                         ".attn.to_out.0")
+                    #                     if not watch:
+                    #                         continue
+                    #                     w_src = module.weight.detach().float().cpu()
+                    #                     w_ema = ema_module.weight.detach().float().cpu()
+                    #                     diff = (w_src - w_ema).abs().mean().item()
+                    #                     log.critical(
+                    #                         f"[EMA-INIT-CHECK] {module_name} src(mean={float(w_src.mean()):.6f},std={float(w_src.std()):.6f}) "
+                    #                         f"vs ema(mean={float(w_ema.mean()):.6f},std={float(w_ema.std()):.6f}) | mean_abs_diff={diff:.6e}"
+                    #                     )
+                    #                     printed += 1
+                    # except Exception as e:
+                    #     log.warning(f"EMA init debug check failed: {e}")
 
                     if self.config.fsdp.checkpoint:
                         fsdp_blocks_cls = model.net.fsdp_wrap_block_cls
@@ -846,23 +1033,83 @@ def diffusion_fsdp_class_decorator(base_class: Type[T]) -> Type[T]:
 
         @misc.timer("FSDP state_dict_model")
         def state_dict_model(self) -> Dict:
-            with FSDP.summon_full_params(self.model):
-                pass
             with FSDP.state_dict_type(
                 self.model, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             ):
                 model_state = self.model.state_dict()
+            try:
+                tp_enabled = parallel_state.is_initialized() and parallel_state.get_tensor_model_parallel_world_size() > 1
+            except Exception:
+                tp_enabled = False
+            if tp_enabled:
+                tp_group = parallel_state.get_tensor_model_parallel_group()
+                tp_world_size = parallel_state.get_tensor_model_parallel_world_size()
+                # 使用 FULL_STATE_DICT 的 CPU 切片，纯 CPU all_gather_object，仅在 TP rank0 写回
+                for module_name, module in self.model.named_modules():
+                    if isinstance(module, te.pytorch.Linear) and hasattr(module, "parallel_mode"):
+                        clean_name = module_name.replace("_fsdp_wrapped_module.", "")
+                        clean_name = clean_name.replace("_checkpoint_wrapped_module.", "")
+                        key_weight = f"{clean_name}.weight"
+                        local_cpu = model_state.get(key_weight, None)
+                        payload = local_cpu if local_cpu is not None else torch.empty(0, dtype=torch.float32)
+                        gathered_objs: list[torch.Tensor | None] = [None for _ in range(tp_world_size)]
+                        dist.all_gather_object(gathered_objs, payload, group=tp_group)
+                        if parallel_state.get_tensor_model_parallel_rank() == 0 and local_cpu is not None:
+                            shards: list[torch.Tensor] = []
+                            base_dtype = local_cpu.dtype
+                            for g in gathered_objs:
+                                if isinstance(g, torch.Tensor) and g.numel() > 0:
+                                    shards.append(g.detach().to(device="cpu", dtype=base_dtype).contiguous())
+                            if len(shards) == 0:
+                                continue
+                            if module.parallel_mode == "column":
+                                full_w = torch.cat(shards, dim=0)
+                            elif module.parallel_mode == "row":
+                                full_w = torch.cat(shards, dim=1)
+                            else:
+                                full_w = local_cpu
+                            model_state[key_weight] = full_w.cpu()
             if self.config.ema.enabled:
-                with FSDP.summon_full_params(self.model_ema):
-                    pass
                 with FSDP.state_dict_type(
                     self.model_ema,
                     StateDictType.FULL_STATE_DICT,
                     FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
                 ):
                     ema_model_state = self.model_ema.state_dict()
+                if tp_enabled:
+                    tp_group = parallel_state.get_tensor_model_parallel_group()
+                    tp_world_size = parallel_state.get_tensor_model_parallel_world_size()
+                    for module_name, module in self.model_ema.named_modules():
+                        if isinstance(module, te.pytorch.Linear) and hasattr(module, "parallel_mode"):
+                            clean_name = module_name.replace("_fsdp_wrapped_module.", "")
+                            clean_name = clean_name.replace("_checkpoint_wrapped_module.", "")
+                            key_weight = f"{clean_name}.weight"
+                            local_cpu = ema_model_state.get(key_weight, None)
+                            payload = local_cpu if local_cpu is not None else torch.empty(0, dtype=torch.float32)
+                            gathered_objs: list[torch.Tensor | None] = [None for _ in range(tp_world_size)]
+                            dist.all_gather_object(gathered_objs, payload, group=tp_group)
+                            if parallel_state.get_tensor_model_parallel_rank() == 0 and local_cpu is not None:
+                                shards: list[torch.Tensor] = []
+                                base_dtype = local_cpu.dtype
+                                for g in gathered_objs:
+                                    if isinstance(g, torch.Tensor) and g.numel() > 0:
+                                        shards.append(g.detach().to(device="cpu", dtype=base_dtype).contiguous())
+                                if len(shards) == 0:
+                                    continue
+                                if module.parallel_mode == "column":
+                                    full_w = torch.cat(shards, dim=0)
+                                elif module.parallel_mode == "row":
+                                    full_w = torch.cat(shards, dim=1)
+                                else:
+                                    full_w = local_cpu
+                                ema_model_state[key_weight] = full_w.cpu()
             else:
                 ema_model_state = None
+            # 仅在全局 rank0 且 TP rank0 返回完整权重，其余返回空，避免重复写盘
+            if not distributed.is_rank0() or (tp_enabled and parallel_state.get_tensor_model_parallel_rank() != 0):
+                model_state = {}
+                if self.config.ema.enabled:
+                    ema_model_state = None
             return {
                 "model": model_state,
                 "ema": ema_model_state,
