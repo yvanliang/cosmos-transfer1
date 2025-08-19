@@ -74,7 +74,7 @@ class MultiCameraGeneralDIT(GeneralDIT):
 
         super().__init__(*args, **kwargs)
         # reinit self.blocks
-        del self.blocks
+        del self.blocks  # 原本的模型未指定n_views，现在是n_views=3。而该参数只作用于ca，ca时将view合并到batch维度，这样每个view的图像token只会和对应视角的文本token计算注意力
         self.blocks = nn.ModuleDict()
 
         layer_mask = [False] * self.num_blocks if kwargs["layer_mask"] is None else kwargs["layer_mask"]

@@ -18,6 +18,7 @@ from cosmos_transfer1.diffusion.config.transfer.conditioner import CTRL_AUG_KEYS
 from cosmos_transfer1.diffusion.datasets.augmentors.basic_augmentors import (
     ReflectionPadding,
     ResizeLargestSideAspectPreserving,
+    AddMaskedInput,
 )
 from cosmos_transfer1.diffusion.datasets.augmentors.control_input import (
     VIDEO_RES_SIZE_INFO,
@@ -123,15 +124,20 @@ for hint_key in CTRL_HINT_KEYS:
                 #     input_keys=input_keys,
                 #     output_keys=output_keys,
                 # ),
+                "add_mask": L(AddMaskedInput)(
+                    input_keys=["video", "object_mask_area"],
+                    output_keys=["control_input_masked_video", "mask"],
+                    args={"scale": 1.3},
+                ),
                 # this addes the control input tensor to the data dict
                 "add_control_input": add_control_input,
                 # this resizes both the video and the control input to the model's required input size
                 "resize_largest_side_aspect_ratio_preserving": L(ResizeLargestSideAspectPreserving)(
-                    input_keys=["video", hint_key],
+                    input_keys=["video", hint_key, "control_input_object", "control_input_masked_video", "mask"],
                     args={"size": VIDEO_RES_SIZE_INFO[resolution]},
                 ),
                 "reflection_padding": L(ReflectionPadding)(
-                    input_keys=["video", hint_key],
+                    input_keys=["video", hint_key, "control_input_object", "control_input_masked_video", "mask"],
                     args={"size": VIDEO_RES_SIZE_INFO[resolution]},
                 ),
             }

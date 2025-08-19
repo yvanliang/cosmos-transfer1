@@ -22,6 +22,7 @@ import os
 import pickle
 import traceback
 import warnings
+import json
 
 import numpy as np
 import torch
@@ -38,7 +39,8 @@ CTRL_TYPE_INFO = {
     "keypoint": {"folder": "keypoint", "format": "pickle", "data_dict_key": "keypoint"},
     "depth": {"folder": "depth", "format": "mp4", "data_dict_key": "depth"},
     "lidar": {"folder": "lidar", "format": "mp4", "data_dict_key": "lidar"},
-    "hdmap": {"folder": "hdmap", "format": "mp4", "data_dict_key": "hdmap"},
+    "hdmap": {"folder": "hdmap_object", "format": "mp4", "data_dict_key": "hdmap"},
+    "object": {"folder": "videos_object", "format": "mp4", "data_dict_key": "object"},
     "seg": {"folder": "seg", "format": "pickle", "data_dict_key": "segmentation"},
     "edge": {"folder": None},  # Canny edge, computed on-the-fly
     "vis": {"folder": None},  # Blur, computed on-the-fly
@@ -279,6 +281,7 @@ class AVTransferDataset(ExampleTransferDataset):
         resolution,
         view_keys,
         hint_key="control_input_hdmap",
+        object_hint_key="control_input_object",
         sample_n_views=-1,
         caption_view_idx_map=None,
         is_train=True,
@@ -311,30 +314,36 @@ class AVTransferDataset(ExampleTransferDataset):
 
         # Control input setup with file formats
         self.ctrl_type = hint_key.replace("control_input_", "")
+        self.object_ctrl_type = object_hint_key.replace("control_input_", "")
         self.ctrl_data_pth_config = CTRL_TYPE_INFO[self.ctrl_type]
+        self.ctrl_data_object_pth_config = CTRL_TYPE_INFO[self.object_ctrl_type]
 
-        # Set up directories - only collect paths
-        video_dir = os.path.join(self.dataset_dir, "videos", "pinhole_front")
-        self.video_paths = [os.path.join(video_dir, f) for f in os.listdir(video_dir) if f.endswith(".mp4")]
+        # Set up configs
+        data_config_dir = os.path.join(self.dataset_dir, "final_info.json")
+        with open(data_config_dir, "r") as f:
+            self.data_info = json.load(f)
         self.t5_dir = os.path.join(self.dataset_dir, "t5_xxl")
 
         cache_dir = os.path.join(self.dataset_dir, "cache")
         self.prefix_t5_embeddings = {}
         for view_key in view_keys:
             with open(os.path.join(cache_dir, f"prefix_{view_key}.pkl"), "rb") as f:
-                self.prefix_t5_embeddings[view_key] = pickle.load(f)
+                self.prefix_t5_embeddings[view_key] = pickle.load(f)[0]
         if caption_view_idx_map is None:
             self.caption_view_idx_map = dict([(i, i) for i in range(len(self.view_keys))])
         else:
             self.caption_view_idx_map = caption_view_idx_map
         self.sample_n_views = sample_n_views
 
-        print(f"Finish initializing dataset with {len(self.video_paths)} videos in total.")
+        print(f"Finish initializing dataset with {len(self.data_info)} videos in total.")
 
         # Set up preprocessing and augmentation
         augmentor_name = f"video_ctrlnet_augmentor_{hint_key}"
         augmentor_cfg = AUGMENTOR_OPTIONS[augmentor_name](resolution=resolution)
         self.augmentor = {k: instantiate(v) for k, v in augmentor_cfg.items()}
+
+    def __len__(self):
+        return len(self.data_info)
 
     def _load_video(self, video_path, frame_ids):
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
@@ -352,32 +361,20 @@ class AVTransferDataset(ExampleTransferDataset):
         max_retries = 3
         for _ in range(max_retries):
             try:
-                video_path = self.video_paths[index]
-                video_name = os.path.basename(video_path).replace(".mp4", "")
+                data_info = self.data_info[index]
+                video_name = data_info["clip_name"]
+                video_path = os.path.join(self.dataset_dir, "videos", f"pinhole_{data_info['first_camera']}",
+                                          video_name + ".mp4")
 
                 data = dict()
                 ctrl_videos = []
+                ctrl_object_videos = []
                 videos = []
                 t5_embeddings = []
                 t5_masks = []
-                view_indices = [i for i in range(len(self.view_keys))]
                 view_indices_conditioning = []
-                if self.sample_n_views > 1:
-                    sampled_idx = np.random.choice(
-                        np.arange(1, len(view_indices)),
-                        size=min(self.sample_n_views - 1, len(view_indices) - 1),
-                        replace=False,
-                    )
-                    sampled_idx = np.concatenate(
-                        [
-                            [
-                                0,
-                            ],
-                            sampled_idx,
-                        ]
-                    )
-                    sampled_idx.sort()
-                    view_indices = sampled_idx.tolist()
+                camera_names = [f"pinhole_{data_info[n]}" for n in ("first_camera", "second_camera", "third_camera")]
+                view_indices = [self.view_keys.index(n) for n in camera_names]
 
                 frame_ids = None
                 fps = None
@@ -399,22 +396,17 @@ class AVTransferDataset(ExampleTransferDataset):
                     aspect_ratio = detect_aspect_ratio((video.shape[3], video.shape[2]))  # expects (W, H)
                     videos.append(video)
 
-                    if video_name[-2] == "_" and video_name[-1].isdigit():
-                        video_name_emb = video_name[:-2]
-                    else:
-                        video_name_emb = video_name
-
-                    if self.load_mv_emb or view_key == "pinhole_front":
-                        t5_embedding_path = os.path.join(self.dataset_dir, "t5_xxl", view_key, f"{video_name_emb}_0.pkl")
+                    if self.load_mv_emb:
+                        t5_embedding_path = os.path.join(self.dataset_dir, "t5_xxl", view_key, f"{video_name}.pkl")
                         with open(t5_embedding_path, "rb") as f:
-                            t5_embedding = pickle.load(f)[0]
+                            t5_embedding = pickle.load(f)[0][0]
                         if self.load_mv_emb:
                             t5_embedding = np.concatenate([self.prefix_t5_embeddings[view_key], t5_embedding], axis=0)
                     else:
                         # use camera prompt
                         t5_embedding = self.prefix_t5_embeddings[view_key]
 
-                    t5_embedding = torch.from_numpy(t5_embedding)[0]
+                    t5_embedding = torch.from_numpy(t5_embedding)
                     t5_mask = torch.ones(t5_embedding.shape[0], dtype=torch.int64)
                     if t5_embedding.shape[0] < 512:
                         t5_embedding = torch.cat([t5_embedding, torch.zeros(512 - t5_embedding.shape[0], 1024)], dim=0)
@@ -434,7 +426,7 @@ class AVTransferDataset(ExampleTransferDataset):
                                     self.dataset_dir,
                                     self.ctrl_data_pth_config["folder"],
                                     view_key,
-                                    f"{video_name}.{self.ctrl_data_pth_config['format']}",
+                                    f"{video_name}_{str(data_info['index']).zfill(5)}.{self.ctrl_data_pth_config['format']}",
                                 )
                                 if self.ctrl_data_pth_config["folder"] is not None
                                 else None,
@@ -445,8 +437,27 @@ class AVTransferDataset(ExampleTransferDataset):
                             raise Exception("Failed to load v_ctrl_data")
                         ctrl_videos.append(v_ctrl_data[self.ctrl_type]["video"])
 
+                    if self.object_ctrl_type:
+                        v_ctrl_data = self._load_control_data(
+                            {
+                                "ctrl_path": os.path.join(
+                                    self.dataset_dir,
+                                    self.ctrl_data_object_pth_config["folder"],
+                                    view_key,
+                                    f"{video_name}_{str(data_info['index']).zfill(5)}.{self.ctrl_data_pth_config['format']}",
+                                )
+                                if self.ctrl_data_pth_config["folder"] is not None
+                                else None,
+                                "frame_ids": frame_ids,
+                            }
+                        )
+                        if v_ctrl_data is None:  # Control data loading failed
+                            raise Exception("Failed to load v_ctrl_data")
+                        ctrl_object_videos.append(v_ctrl_data[self.ctrl_type]["video"])
+
                 video = torch.cat(videos, dim=1)
                 ctrl_videos = torch.cat(ctrl_videos, dim=1)
+                ctrl_object_videos = torch.cat(ctrl_object_videos, dim=1)
                 t5_embedding = torch.cat(t5_embeddings, dim=0)
                 view_indices_conditioning = torch.cat(view_indices_conditioning, dim=0)
 
@@ -467,6 +478,11 @@ class AVTransferDataset(ExampleTransferDataset):
                 data["padding_mask"] = torch.zeros(1, 704, 1280)
                 data[self.ctrl_type] = dict()
                 data[self.ctrl_type]["video"] = ctrl_videos
+                data["control_input_object"] = ctrl_object_videos
+                data["object_mask_area"] = [
+                    [bbox for n in camera_names for bbox in o[n]]
+                    for o in data_info["object_position"]
+                ]
 
                 # The ctrl_data above is the 'raw' data loaded (e.g. a loaded lidar pkl).
                 # Next, we process it into the control input "video" tensor that the model expects.
@@ -493,37 +509,34 @@ if __name__ == "__main__":
     """
     Sanity check for the dataset.
     """
-    control_input_key = "control_input_lidar"
+    import imageio
+    from tqdm import tqdm
+
+    control_input_key = "control_input_hdmap"
     visualize_control_input = True
 
     dataset = AVTransferDataset(
-        dataset_dir="datasets/waymo_transfer1",
-        view_keys=["pinhole_front"],
+        dataset_dir='/data/lyy_dataset/waymo_transfer/training',
+        view_keys=['pinhole_front', 'pinhole_front_left', 'pinhole_front_right', 'pinhole_side_left', 'pinhole_side_right'],
         hint_key=control_input_key,
-        num_frames=121,
+        num_frames=57,
         resolution="720",
         is_train=True,
+        sample_n_views=3,
+        load_mv_emb=True,
     )
     print("finished init dataset")
-    indices = [0, 12, 100, -1]
-    for idx in indices:
-        data = dataset[idx]
-        print(
-            (
-                f"{idx=} "
-                f"{data['frame_start']=}\n"
-                f"{data['frame_end']=}\n"
-                f"{data['video'].sum()=}\n"
-                f"{data['video'].shape=}\n"
-                f"{data[control_input_key].shape=}\n"  # should match the video shape
-                f"{data['video_name']=}\n"
-                f"{data['t5_text_embeddings'].shape=}\n"
-                "---"
-            )
-        )
-        if visualize_control_input:
-            import imageio
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,  # Set to 0 for debugging
+        pin_memory=True,
+    )
 
-            control_input_tensor = data[control_input_key].permute(1, 2, 3, 0).cpu().numpy()
-            video_name = f"{control_input_key}.mp4"
-            imageio.mimsave(video_name, control_input_tensor, fps=24)
+    for index, data in enumerate(tqdm(dataloader)):
+        tensor_visualize = torch.concat((data['control_input_hdmap'], data['control_input_object'], data['video'], data['masked_video']), dim=-2)
+        tensor_visualize = torch.concat(tensor_visualize.chunk(3, dim=2), dim=-1).squeeze(0)
+        tensor_visualize = tensor_visualize.permute(1, 2, 3, 0).cpu().numpy()
+        video_name = f"/data/lyy_dataset/test_transfer/visualize_data/{index}.mp4"
+        imageio.mimsave(video_name, tensor_visualize, fps=24)
