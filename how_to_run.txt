@@ -1,0 +1,11 @@
+cd /starmap/nas/workspace/yzy/code/cosmos-transfer1
+mv /starmap/nas/workspace/yzy/code/cosmos-transfer1/checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV-Single2MultiView/checkpoints_tp /starmap/nas/workspace/yzy/code/cosmos-transfer1/checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV-Single2MultiView/checkpoints_tp8
+PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV-Single2MultiView/t2w_base_model.pt
+PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV-Single2MultiView/t2w_hdmap_control.pt
+
+
+sbatch training_4node.sh
+
+
+配置文件路径：
+/starmap/nas/workspace/yzy/code/cosmos-transfer1/cosmos_transfer1/diffusion/config/training/experiment/ctrl_7b_tp_sample_av_mv.py
