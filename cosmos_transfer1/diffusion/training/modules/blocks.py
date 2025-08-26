@@ -516,6 +516,116 @@ class VideoAttn(nn.Module):
             raise NotImplementedError(f"Unsupported x_format: {self.x_format}")
 
 
+class MultiAttn(VideoAttn):
+    """
+    Implements multi attention with a conditioning hint signal,
+    compatible with Sequence Parallelism (SP).
+
+    This module performs self-attention on a concatenation of an input tensor `x`
+    and a hint tensor `hint`. It uses a custom attention mask to control the
+    attention flow, correctly handling distributed tensors under SP.
+    The logic remains:
+    1. Full self-attention within `x` (globally).
+    2. Full self-attention within `hint` (globally).
+    3. Cross-attention between `x` and `hint` is restricted to tokens within the
+       same time frame (globally).
+
+    Both `x` and `hint` share the same Q, K, V projection weights.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def forward(
+            self,
+            x: torch.Tensor,
+            hint: torch.Tensor,
+            context: Optional[torch.Tensor] = None,
+            crossattn_mask: Optional[torch.Tensor] = None,
+            rope_emb_L_1_1_D: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass for spatial-only attention.
+
+        Args:
+            x (Tensor): Input tensor of shape (B, T, H, W, D) or (T, H, W, B, D).
+            context (Tensor): Ignored, as this module performs self-attention.
+            hint (Optional[Tensor]): Control signal with the same shape as x.
+            crossattn_mask (Optional[Tensor]): Ignored.
+            rope_emb_L_1_1_D (Optional[Tensor]): Rotary positional embedding of shape (L, 1, 1, D),
+                                                 where L is expected to be H * W.
+
+        Returns:
+            A tuple containing the output tensor for x and the output tensor for hint.
+            If hint is not provided, the second element is None.
+        """
+
+        """
+                Forward pass for spatial-only attention.
+
+                Args:
+                    x (Tensor): Input tensor of shape (B, T, H, W, D) or (T, H, W, B, D).
+                    context (Tensor): Ignored, as this module performs self-attention.
+                    hint (Optional[Tensor]): Control signal with the same shape as x.
+                    crossattn_mask (Optional[Tensor]): Ignored.
+                    rope_emb_L_1_1_D (Optional[Tensor]): Rotary positional embedding of shape (L, 1, 1, D),
+                                                         where L is expected to be H * W.
+
+                Returns:
+                    A tuple containing the output tensor for x and the output tensor for hint.
+                    If hint is not provided, the second element is None.
+                """
+
+        # --- 1. 从 Batch 维度拆分出 x 和 hint ---
+        if self.x_format == "BTHWD":
+            # Input shape: (B_doubled, slice_len, 1, 1, D) after scatter
+            B, S_slice, _, _, D = x.shape
+
+            # Reshape for attention: (B*slice_len, 1, D) -> (B, slice_len, D)
+            x_reshaped = x.view(B, S_slice, D)
+            hint_reshaped = hint.view(B, S_slice, D)
+            sequence_dim = 1
+
+        elif self.x_format == "THWBD":
+            # Input shape: (slice_len, 1, 1, B_doubled, D) after scatter
+            S_slice, _, _, B, D = x.shape
+
+            # Reshape for attention: (slice_len, 1, 1, B, D) -> (slice_len, B, D)
+            x_reshaped = x.view(S_slice, B, D)
+            hint_reshaped = hint.view(S_slice, B, D)
+            sequence_dim = 0
+        else:
+            raise NotImplementedError(f"Unsupported x_format: {self.x_format}")
+
+        prepared_input = torch.cat([x_reshaped, hint_reshaped], dim=sequence_dim)
+
+        final_rope_emb = None
+        if rope_emb_L_1_1_D is not None:
+            # Assuming rope_emb is also scattered, we get a slice.
+            # We need to construct the rope_emb for the concatenated sequence.
+            # NOTE: This assumes the passed rope_emb corresponds to the original sequence slice.
+            final_rope_emb = torch.cat([rope_emb_L_1_1_D, rope_emb_L_1_1_D], dim=0)
+
+        attn_output = self.attn(
+            prepared_input,
+            context=None,
+            rope_emb=final_rope_emb
+        )
+
+        x_out_reshaped, hint_out_reshaped = torch.chunk(attn_output, 2, dim=sequence_dim)
+
+        if self.x_format == "BTHWD":
+            # (B, slice_len, D) -> (B, slice_len, 1, 1, D)
+            x_out = x_out_reshaped.view(B, S_slice, 1, 1, D)
+            hint_out = hint_out_reshaped.view(B, S_slice, 1, 1, D)
+
+        elif self.x_format == "THWBD":
+            # (slice_len, B, D) -> (slice_len, 1, 1, B, D)
+            x_out = x_out_reshaped.view(S_slice, 1, 1, B, D)
+            hint_out = hint_out_reshaped.view(S_slice, 1, 1, B, D)
+
+        return x_out, hint_out
+
 def checkpoint_norm_state(norm_state, x, scale, shift):
     normalized = norm_state(x)
     return normalized * (1 + scale) + shift
@@ -574,6 +684,8 @@ class DITBuildingBlock(nn.Module):
             self.block = VideoAttn(x_dim, None, num_heads, bias=bias, x_format=self.x_format)
         elif block_type in ["mlp", "ff"]:
             self.block = GPT2FeedForward(x_dim, int(x_dim * mlp_ratio), dropout=mlp_dropout, bias=bias)
+        elif block_type in ["multi_attn", "ma"]:
+            self.block = MultiAttn(x_dim, None, num_heads, bias=bias, x_format=self.x_format, n_views=n_views)
         else:
             raise ValueError(f"Unknown block type: {block_type}")
 
@@ -923,6 +1035,7 @@ class DITBuildingBlock(nn.Module):
         adaln_lora_B_3D: Optional[torch.Tensor] = None,
         regional_contexts: Optional[torch.Tensor] = None,
         region_masks: Optional[torch.Tensor] = None,
+        hint: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass for dynamically configured blocks with adaptive normalization.
@@ -948,6 +1061,7 @@ class DITBuildingBlock(nn.Module):
             shift_B_D, scale_B_D, gate_B_D = self.adaLN_modulation(emb_B_D).chunk(self.n_adaln_chunks, dim=1)
 
         if self.x_format == "BTHWD":
+            raise NotImplementedError
             shift_B_1_1_1_D, scale_B_1_1_1_D, gate_B_1_1_1_D = (
                 shift_B_D.unsqueeze(1).unsqueeze(2).unsqueeze(3),
                 scale_B_D.unsqueeze(1).unsqueeze(2).unsqueeze(3),
@@ -978,6 +1092,12 @@ class DITBuildingBlock(nn.Module):
                 x = x + gate_B_1_1_1_D * self.block(
                     self.norm_state(x) * (1 + scale_B_1_1_1_D) + shift_B_1_1_1_D,
                 )
+            elif self.block_type in ["multi_attn", "ma"]:
+                x = x + gate_B_1_1_1_D * self.block(
+                    self.norm_state(x) * (1 + scale_B_1_1_1_D) + shift_B_1_1_1_D,
+                    context=None,
+                    rope_emb_L_1_1_D=rope_emb_L_1_1_D,
+                )
             else:
                 raise ValueError(f"Unknown block type: {self.block_type}")
         elif self.x_format == "THWBD":
@@ -993,6 +1113,12 @@ class DITBuildingBlock(nn.Module):
                         checkpoint_norm_state, self.norm_state, x, scale_1_1_1_B_D, shift_1_1_1_B_D, use_reentrant=False
                     ),
                 )
+                if hint is not None:
+                    hint = hint + gate_1_1_1_B_D * self.block(
+                        torch.utils.checkpoint.checkpoint(
+                            checkpoint_norm_state, self.norm_state, hint, scale_1_1_1_B_D, shift_1_1_1_B_D, use_reentrant=False
+                        ),
+                    )
             elif self.block_type in ["full_attn", "fa"]:
                 x = x + gate_1_1_1_B_D * self.block(
                     torch.utils.checkpoint.checkpoint(
@@ -1001,6 +1127,14 @@ class DITBuildingBlock(nn.Module):
                     context=None,
                     rope_emb_L_1_1_D=rope_emb_L_1_1_D,
                 )
+                if hint is not None:
+                    hint = hint + gate_1_1_1_B_D * self.block(
+                        torch.utils.checkpoint.checkpoint(
+                            checkpoint_norm_state, self.norm_state, hint, scale_1_1_1_B_D, shift_1_1_1_B_D, use_reentrant=False
+                        ),
+                        context=None,
+                        rope_emb_L_1_1_D=rope_emb_L_1_1_D,
+                    )
             elif self.block_type in ["cross_attn", "ca"]:
                 x = x + gate_1_1_1_B_D * self.block(
                     torch.utils.checkpoint.checkpoint(
@@ -1010,11 +1144,33 @@ class DITBuildingBlock(nn.Module):
                     crossattn_mask=crossattn_mask,
                     rope_emb_L_1_1_D=rope_emb_L_1_1_D,
                 )
+                if hint is not None:
+                    hint = hint + gate_1_1_1_B_D * self.block(
+                        torch.utils.checkpoint.checkpoint(
+                            checkpoint_norm_state, self.norm_state, hint, scale_1_1_1_B_D, shift_1_1_1_B_D, use_reentrant=False
+                        ),
+                        context=crossattn_emb,
+                        crossattn_mask=crossattn_mask,
+                        rope_emb_L_1_1_D=rope_emb_L_1_1_D,
+                    )
+            elif self.block_type in ["multi_attn", "ma"]:
+                x, hint = self.block(
+                    torch.utils.checkpoint.checkpoint(
+                        checkpoint_norm_state, self.norm_state, x, scale_1_1_1_B_D, shift_1_1_1_B_D, use_reentrant=False
+                    ),
+                    torch.utils.checkpoint.checkpoint(
+                        checkpoint_norm_state, self.norm_state, hint, scale_1_1_1_B_D, shift_1_1_1_B_D, use_reentrant=False
+                    ),
+                    context=None,
+                    rope_emb_L_1_1_D=rope_emb_L_1_1_D,
+                )
+                x = x + gate_1_1_1_B_D * x
+                hint = hint + gate_1_1_1_B_D * hint
             else:
                 raise ValueError(f"Unknown block type: {self.block_type}")
         else:
             raise NotImplementedError(f"Unsupported x_format: {self.x_format}")
-        return x
+        return x if hint is None else (x, hint)
 
 
 class GeneralDITTransformerBlock(nn.Module):
@@ -1072,6 +1228,7 @@ class GeneralDITTransformerBlock(nn.Module):
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
         regional_contexts: Optional[torch.Tensor] = None,
         region_masks: Optional[torch.Tensor] = None,
+        hint: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.use_checkpoint:
             return torch.utils.checkpoint.checkpoint(
@@ -1086,6 +1243,7 @@ class GeneralDITTransformerBlock(nn.Module):
                 regional_contexts,
                 region_masks,
                 use_reentrant=False,
+                hint=None,
             )
         else:
             return self._forward(
@@ -1098,6 +1256,7 @@ class GeneralDITTransformerBlock(nn.Module):
                 extra_per_block_pos_emb,
                 regional_contexts,
                 region_masks,
+                hint,
             )
 
     def _forward(
@@ -1111,11 +1270,12 @@ class GeneralDITTransformerBlock(nn.Module):
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
         regional_contexts: Optional[torch.Tensor] = None,
         region_masks: Optional[torch.Tensor] = None,
+        hint: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if extra_per_block_pos_emb is not None:
             x = x + extra_per_block_pos_emb
         for block in self.blocks:
-            x = block(
+            output = block(
                 x,
                 emb_B_D,
                 crossattn_emb,
@@ -1124,8 +1284,13 @@ class GeneralDITTransformerBlock(nn.Module):
                 adaln_lora_B_3D=adaln_lora_B_3D,
                 regional_contexts=regional_contexts,
                 region_masks=region_masks,
+                hint=hint,
             )
-        return x
+            if isinstance(output, tuple):
+                x, hint = output
+            else:
+                x = output
+        return x if hint is None else (x, hint)
 
     def set_memory_save(self, mode: bool = True):
         # to make fsdp happy!

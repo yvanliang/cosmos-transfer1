@@ -17,6 +17,7 @@ from typing import Optional
 
 import omegaconf
 import torch
+import numpy as np
 import torchvision.transforms.functional as transforms_F
 
 from cosmos_transfer1.diffusion.datasets.augmentors.control_input import Augmentor
@@ -238,3 +239,98 @@ class ResizeLargestSideAspectPreserving(Augmentor):
             if out_key != inp_key:
                 del data_dict[inp_key]
         return data_dict
+
+
+class AddMaskedInput(Augmentor):
+    def __init__(self, input_keys: list, output_keys: Optional[list] = None, args: Optional[dict] = None) -> None:
+        super().__init__(input_keys, output_keys, args)
+        self.scale = args.get("scale", 1.3) if args else 1.3
+        self.is_train = True
+        # self.is_train = args.get("is_train", False) if args else False
+
+    def __call__(self, data_dict: dict) -> dict:
+        origin_video = data_dict[self.input_keys[0]]
+        mask_bbox = data_dict[self.input_keys[1]]
+
+        C, T, H, W = origin_video.shape
+        device = origin_video.device
+
+        masks = torch.zeros((T, H, W), dtype=torch.bool, device=device)
+        yy, xx = torch.meshgrid(
+            torch.arange(H, device=device, dtype=torch.float32),
+            torch.arange(W, device=device, dtype=torch.float32),
+            indexing='ij'
+        )
+        yy = yy.unsqueeze(0)
+        xx = xx.unsqueeze(0)
+
+        for object_bboxes_list in mask_bbox:
+            if self.is_train:
+                scales_y = torch.rand(T, device=device) * 0.2 + self.scale
+                scales_x = torch.rand(T, device=device) * 0.2 + self.scale
+            else:
+                scales_y = torch.full((T,), 1.1, device=device, dtype=torch.float32)
+                scales_x = torch.full((T,), 1.1, device=device, dtype=torch.float32)
+
+            valid_frames_mask = torch.tensor([b is not None for b in object_bboxes_list], device=device)
+
+            if not torch.any(valid_frames_mask):
+                continue
+
+            bboxes_list_filled = [
+                torch.as_tensor(b, dtype=torch.float32) if b is not None
+                else torch.zeros(4, dtype=torch.float32)
+                for b in object_bboxes_list
+            ]
+
+            bboxes_tensor = torch.stack(bboxes_list_filled).to(device)
+            scaled_bboxes = scale_bbox_batch(bboxes_tensor, (H, W), scales_x, scales_y).view(T, 4, 1, 1)
+
+            masks |= (
+                    (xx >= scaled_bboxes[:, 0]) & (xx < scaled_bboxes[:, 2]) &
+                    (yy >= scaled_bboxes[:, 1]) & (yy < scaled_bboxes[:, 3]) &
+                    valid_frames_mask.view(T, 1, 1)
+            )
+
+        masks = masks.unsqueeze(0)
+        masked_video = origin_video.clone()
+        masked_video.masked_fill_(masks, 127)
+
+        del data_dict[self.input_keys[1]]
+        data_dict[self.output_keys[0]] = masked_video
+        data_dict[self.output_keys[1]] = masks
+
+        return data_dict
+
+@torch.jit.script
+def scale_bbox_batch(
+    bboxes: torch.Tensor,
+    image_shape: tuple[int, int],
+    scales_x: torch.Tensor,
+    scales_y: torch.Tensor
+) -> torch.Tensor:
+    """
+    Scales a batch of bounding boxes, with a different scale for each bbox.
+
+    Args:
+        bboxes (torch.Tensor): A tensor of shape (N, 4) representing N bboxes [x1, y1, x2, y2].
+        image_shape (tuple): The shape of the image (H, W).
+        scales_x (torch.Tensor): A 1D tensor of shape (N,) with the scaling factor for the x-axis for each bbox.
+        scales_y (torch.Tensor): A 1D tensor of shape (N,) with the scaling factor for the y-axis for each bbox.
+
+    Returns:
+        torch.Tensor: The scaled bboxes.
+    """
+    H, W = image_shape
+    x_centers = (bboxes[:, 0] + bboxes[:, 2]) / 2
+    y_centers = (bboxes[:, 1] + bboxes[:, 3]) / 2
+
+    widths = (bboxes[:, 2] - bboxes[:, 0]) * scales_x
+    heights = (bboxes[:, 3] - bboxes[:, 1]) * scales_y
+
+    new_x1 = torch.clamp(x_centers - widths / 2, 0, W)
+    new_y1 = torch.clamp(y_centers - heights / 2, 0, H)
+    new_x2 = torch.clamp(x_centers + widths / 2, 0, W)
+    new_y2 = torch.clamp(y_centers + heights / 2, 0, H)
+
+    return torch.stack([new_x1, new_y1, new_x2, new_y2], dim=1)

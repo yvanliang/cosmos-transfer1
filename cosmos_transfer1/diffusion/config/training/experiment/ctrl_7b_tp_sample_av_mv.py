@@ -51,6 +51,7 @@ cs = ConfigStore.instance()
 num_blocks = 28
 num_frames = 57
 num_control_blocks = 3
+num_control_blocks_object = 4
 ckpt_root = "checkpoints/"
 data_root = "/starmap/nas/workspace/yzy/data/waymo_transfer/training"
 
@@ -160,7 +161,7 @@ def make_ctrlnet_config(
                 timestamp_seed=True,  # important for dataver dataloader!!!
             ),
             model_parallel=dict(
-                tensor_model_parallel_size=2,
+                tensor_model_parallel_size=8,
                 sequence_parallel=True,
                 bf16=True,
                 enable_autocast=True,
@@ -173,7 +174,7 @@ def make_ctrlnet_config(
                 fsdp_enabled=True,
                 fsdp=dict(
                     checkpoint=True,
-                    sharding_group_size=4,
+                    sharding_group_size=2,
                     sharding_strategy="hybrid",
                 ),
                 ema=dict(enabled=False),
@@ -192,7 +193,7 @@ def make_ctrlnet_config(
                 hint_dropout_rate=0.15,
                 conditioner=dict(
                     video_cond_bool=dict(
-                        condition_location="first_cam" if t2w else "first_cam_and_random_n",
+                        condition_location="all_cam_and_all_n",
                         cfg_unconditional_type="zero_condition_region_condition_mask",
                         apply_corruption_to_condition_region="noise_with_sigma",
                         condition_on_augment_sigma=False,
@@ -229,6 +230,10 @@ def make_ctrlnet_config(
                     extra_per_block_abs_pos_emb=True,
                     pos_emb_learnable=True,
                     extra_per_block_abs_pos_emb_type="learnable",
+                    obj_ctrl=dict(
+                        block_config='FA-MA-CA-MLP',
+                        num_ctrl_blocks=num_control_blocks_object,
+                    )
                 ),
                 tokenizer=dict(
                     pixel_chunk_duration=num_frames,

@@ -143,7 +143,7 @@ class MultiviewExtendDiffusionModel(ExtendDiffusionModel):
                 sigma,
                 seed_inference,
             )
-            condition_video_indicator = condition.condition_video_indicator  # [B, 1, T, 1, 1]
+            condition_video_indicator = condition.condition_video_input_mask
             if parallel_state.get_context_parallel_world_size() > 1:
                 cp_group = parallel_state.get_context_parallel_group()
 
@@ -357,6 +357,9 @@ class MultiviewExtendDiffusionModel(ExtendDiffusionModel):
             )
             condition_video_indicator[:, :, :num_condition_t] += 1.0
             condition_video_indicator = condition_video_indicator.clamp(max=1.0)
+        elif self.config.conditioner.video_cond_bool.condition_location == "all_cam_and_all_n":
+            # condition on first cam
+            condition_video_indicator.fill_(1.0)
         else:
             raise NotImplementedError(
                 f"condition_location {self.config.conditioner.video_cond_bool.condition_location} not implemented; training={self.training}"
