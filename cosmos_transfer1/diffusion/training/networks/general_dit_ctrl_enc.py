@@ -185,7 +185,7 @@ class GeneralDITEncoder(GeneralDIT):
         """
         # record the input as they are replaced in this forward
         obj_ctrl = self.net_obj.forward(
-            x=kwargs["control_input_masked_video"],
+            x=kwargs["control_input_pristine"],
             timesteps=timesteps,
             crossattn_emb=crossattn_emb,
             crossattn_mask=crossattn_mask,
@@ -194,7 +194,7 @@ class GeneralDITEncoder(GeneralDIT):
             padding_mask=padding_mask,
             scalar_feature=scalar_feature,
             data_type=data_type,
-            hint_key="control_input_object",
+            hint_key="control_input_degraded",
             base_model=base_model,
             control_weight=control_weight,
             num_layers_to_use=num_layers_to_use,

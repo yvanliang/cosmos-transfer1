@@ -126,18 +126,18 @@ for hint_key in CTRL_HINT_KEYS:
                 # ),
                 "add_mask": L(AddMaskedInput)(
                     input_keys=["video", "object_mask_area"],
-                    output_keys=["control_input_masked_video", "mask"],
+                    output_keys=["control_input_pristine", "mask"],
                     args={"scale": 1.3},
                 ),
                 # this addes the control input tensor to the data dict
                 "add_control_input": add_control_input,
                 # this resizes both the video and the control input to the model's required input size
                 "resize_largest_side_aspect_ratio_preserving": L(ResizeLargestSideAspectPreserving)(
-                    input_keys=["video", hint_key, "control_input_object", "control_input_masked_video", "mask"],
+                    input_keys=["video", hint_key, "control_input_degraded", "control_input_pristine", "mask"],
                     args={"size": VIDEO_RES_SIZE_INFO[resolution]},
                 ),
                 "reflection_padding": L(ReflectionPadding)(
-                    input_keys=["video", hint_key, "control_input_object", "control_input_masked_video", "mask"],
+                    input_keys=["video", hint_key, "control_input_degraded", "control_input_pristine", "mask"],
                     args={"size": VIDEO_RES_SIZE_INFO[resolution]},
                 ),
             }

@@ -41,6 +41,7 @@ CTRL_TYPE_INFO = {
     "lidar": {"folder": "lidar", "format": "mp4", "data_dict_key": "lidar"},
     "hdmap": {"folder": "hdmap_object_front", "format": "mp4", "data_dict_key": "hdmap"},
     "object": {"folder": "videos_object_front", "format": "mp4", "data_dict_key": "object"},
+    "sparse": {"folder": "videos_sparse", "format": "mp4", "data_dict_key": "sparse"},
     "seg": {"folder": "seg", "format": "pickle", "data_dict_key": "segmentation"},
     "edge": {"folder": None},  # Canny edge, computed on-the-fly
     "vis": {"folder": None},  # Blur, computed on-the-fly
@@ -282,6 +283,7 @@ class AVTransferDataset(ExampleTransferDataset):
         view_keys,
         hint_key="control_input_hdmap",
         object_hint_key="control_input_object",
+        sparse_hint_key="control_input_sparse",
         sample_n_views=-1,
         caption_view_idx_map=None,
         is_train=True,
@@ -315,8 +317,10 @@ class AVTransferDataset(ExampleTransferDataset):
         # Control input setup with file formats
         self.ctrl_type = hint_key.replace("control_input_", "")
         self.object_ctrl_type = object_hint_key.replace("control_input_", "")
+        self.sparse_ctrl_type = sparse_hint_key.replace("control_input_", "")
         self.ctrl_data_pth_config = CTRL_TYPE_INFO[self.ctrl_type]
         self.ctrl_data_object_pth_config = CTRL_TYPE_INFO[self.object_ctrl_type]
+        self.ctrl_data_sparse_pth_config = CTRL_TYPE_INFO[self.sparse_ctrl_type]
 
         # Set up configs
         data_config_dir = os.path.join(self.dataset_dir, "final_info_front.json")
@@ -478,7 +482,7 @@ class AVTransferDataset(ExampleTransferDataset):
                 data["padding_mask"] = torch.zeros(1, 704, 1280)
                 data[self.ctrl_type] = dict()
                 data[self.ctrl_type]["video"] = ctrl_videos
-                data["control_input_object"] = ctrl_object_videos
+                data["control_input_degraded"] = ctrl_object_videos
                 data["object_mask_area"] = [
                     [bbox for bbox in o["pinhole_front"]]
                     for o in data_info["object_position"]
@@ -494,14 +498,14 @@ class AVTransferDataset(ExampleTransferDataset):
 
             except Exception:
                 warnings.warn(
-                    f"Invalid data encountered: {self.video_paths[index]}. Skipped "
+                    f"Invalid data encountered: {self.data_info[index]}. Skipped "
                     f"(by randomly sampling another sample in the same dataset)."
                 )
                 warnings.warn("FULL TRACEBACK:")
                 warnings.warn(traceback.format_exc())
                 if _ == max_retries - 1:
                     raise RuntimeError(f"Failed to load data after {max_retries} attempts")
-                index = np.random.randint(len(self.video_paths))
+                index = np.random.randint(len(self.data_info))
         return
 
 
@@ -533,7 +537,8 @@ if __name__ == "__main__":
     )
 
     for index, data in enumerate(tqdm(dataloader)):
-        tensor_visualize = torch.concat((data['control_input_hdmap'], data['control_input_object'], data['video'], data['control_input_masked_video']), dim=-2)
+        tensor_visualize = torch.concat((data['control_input_hdmap'], data['control_input_degraded'], data['video'],
+                                         data['control_input_pristine']), dim=-2)
         tensor_visualize = tensor_visualize.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()
         video_name = f"/data/lyy_dataset/test_transfer/visualize_data_front/{index}.mp4"
         imageio.mimsave(video_name, tensor_visualize, fps=24)
