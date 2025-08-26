@@ -149,31 +149,31 @@ class MultiVideoDiffusionModelWithCtrl(MultiviewExtendDiffusionModel):
         data_batch[hint_key] = _data[hint_key]
         data_batch["hint_key"] = hint_key
 
-        # process control_input_object
-        hint_key_object = "control_input_object"
+        # process control_input_degraded
+        hint_key_degraded = "control_input_degraded"
         is_image_batch = self.is_image_batch(data_batch)
-        _data = {hint_key_object: data_batch[hint_key_object]}
+        _data = {hint_key_degraded: data_batch[hint_key_degraded]}
         if IS_PREPROCESSED_KEY in data_batch:
             _data[IS_PREPROCESSED_KEY] = data_batch[IS_PREPROCESSED_KEY]
         if not is_image_batch:
-            self._normalize_video_databatch_inplace(_data, input_key=hint_key_object)
+            self._normalize_video_databatch_inplace(_data, input_key=hint_key_degraded)
         # if it is an image batch, the control input is also image
         if self.input_image_key in data_batch:
-            self._augment_image_dim_inplace(_data, input_key=hint_key_object)
-        data_batch[hint_key_object] = _data[hint_key_object]
+            self._augment_image_dim_inplace(_data, input_key=hint_key_degraded)
+        data_batch[hint_key_degraded] = _data[hint_key_degraded]
 
-        # process masked_video
-        hint_key_masked_video = "control_input_masked_video"
+        # process control_input_pristine
+        hint_key_pristine = "control_input_pristine"
         is_image_batch = self.is_image_batch(data_batch)
-        _data = {hint_key_masked_video: data_batch[hint_key_masked_video]}
+        _data = {hint_key_pristine: data_batch[hint_key_pristine]}
         if IS_PREPROCESSED_KEY in data_batch:
             _data[IS_PREPROCESSED_KEY] = data_batch[IS_PREPROCESSED_KEY]
         if not is_image_batch:
-            self._normalize_video_databatch_inplace(_data, input_key=hint_key_masked_video)
+            self._normalize_video_databatch_inplace(_data, input_key=hint_key_pristine)
         # if it is an image batch, the control input is also image
         if self.input_image_key in data_batch:
-            self._augment_image_dim_inplace(_data, input_key=hint_key_masked_video)
-        data_batch[hint_key_masked_video] = _data[hint_key_masked_video]
+            self._augment_image_dim_inplace(_data, input_key=hint_key_pristine)
+        data_batch[hint_key_pristine] = _data[hint_key_pristine]
 
         raw_state, latent_state, condition = super(MultiVideoDiffusionModelWithCtrl, self).get_data_and_condition(
             data_batch, kwargs.get("num_condition_t", None)
@@ -194,8 +194,8 @@ class MultiVideoDiffusionModelWithCtrl(MultiviewExtendDiffusionModel):
             latent_hint = torch.cat(latent_hint)
         else:
             latent_hint = self.encode_latent(data_batch)
-        latent_hint_object = self.encode_latent(data_batch, input_key=hint_key_object)
-        latent_hint_masked_video = self.encode_latent(data_batch, input_key=hint_key_masked_video)
+        latent_hint_degraded = self.encode_latent(data_batch, input_key=hint_key_degraded)
+        latent_hint_pristine = self.encode_latent(data_batch, input_key=hint_key_pristine)
 
         # process mask
         comp_factor = self.vae.temporal_compression_factor
@@ -221,18 +221,18 @@ class MultiVideoDiffusionModelWithCtrl(MultiviewExtendDiffusionModel):
 
         # TODO: (qsh 2024-08-23) the following may not be necessary!
         latent_hint = _broadcast(latent_hint, to_tp=True, to_cp=is_video_batch)
-        latent_hint_object = _broadcast(latent_hint_object, to_tp=True, to_cp=is_video_batch)
-        latent_hint_masked_video = _broadcast(latent_hint_masked_video, to_tp=True, to_cp=is_video_batch)
+        latent_hint_degraded = _broadcast(latent_hint_degraded, to_tp=True, to_cp=is_video_batch)
+        latent_hint_pristine = _broadcast(latent_hint_pristine, to_tp=True, to_cp=is_video_batch)
         data_batch["mask"] = _broadcast(data_batch["mask"], to_tp=True, to_cp=is_video_batch)
         condition = broadcast_condition(condition, to_tp=True, to_cp=is_video_batch)
 
         # add extra conditions
         data_batch["latent_hint"] = latent_hint
-        data_batch["latent_hint_object"] = latent_hint_object
-        data_batch["latent_hint_masked_video"] = latent_hint_masked_video
+        data_batch["latent_hint_degraded"] = latent_hint_degraded
+        data_batch["latent_hint_pristine"] = latent_hint_pristine
         setattr(condition, hint_key, latent_hint)
-        setattr(condition, hint_key_object, latent_hint_object)
-        setattr(condition, hint_key_masked_video, latent_hint_masked_video)
+        setattr(condition, hint_key_degraded, latent_hint_degraded)
+        setattr(condition, hint_key_pristine, latent_hint_pristine)
         setattr(condition, "base_model", self.model.base_model)
         return raw_state, latent_state, condition
 
