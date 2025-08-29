@@ -253,7 +253,7 @@ class ExtendDiffusionModel(BaseModel):
                 sigma,
                 seed_inference=seed_inference,
             )
-            condition_video_indicator = condition.condition_video_indicator  # [B, 1, T, 1, 1]
+            condition_video_indicator = condition.condition_video_input_mask
             if parallel_state.get_context_parallel_world_size() > 1:
                 cp_group = parallel_state.get_context_parallel_group()
                 condition_video_indicator = split_inputs_cp(condition_video_indicator, seq_dim=2, cp_group=cp_group)
@@ -492,6 +492,8 @@ class ExtendDiffusionModel(BaseModel):
             condition_rate = self.config.conditioner.video_cond_bool.random_conditon_rate
             flag = torch.ones(1, 1, T, 1, 1, device=latent_state.device).type(latent_dtype) * condition_rate
             condition_video_indicator = torch.bernoulli(flag).type(latent_dtype).to(latent_state.device)
+        elif self.config.conditioner.video_cond_bool.condition_location == "all_cam_and_all_n":
+            condition_video_indicator.fill_(1.0)
         else:
             raise NotImplementedError(
                 f"condition_location {self.config.conditioner.video_cond_bool.condition_location} not implemented; training={self.training}"
