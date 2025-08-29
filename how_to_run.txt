@@ -1,0 +1,9 @@
+PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV/base_model.pt
+PYTHONPATH=. python scripts/convert_ckpt_fsdp_to_tp.py checkpoints/nvidia/Cosmos-Transfer1-7B-Sample-AV/lidar_control.pt
+
+
+sbatch training_4node.sh
+
+
+配置文件路径：
+/starmap/nas/workspace/yzy/code/cosmos-transfer1/cosmos_transfer1/diffusion/config/training/experiment/ctrl_7b_tp_sample_av.py
