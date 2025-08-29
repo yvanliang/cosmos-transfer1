@@ -132,6 +132,8 @@ class BaseVideoCondition:
     frame_repeat: Optional[torch.Tensor] = None
     regional_contexts: Optional[torch.Tensor] = None
     region_masks: Optional[torch.Tensor] = None
+    control_input_object: Optional[torch.Tensor] = None
+    control_input_masked_video: Optional[torch.Tensor] = None
 
     def to_dict(self) -> Dict[str, Optional[torch.Tensor]]:
         return {f.name: getattr(self, f.name) for f in fields(self)}

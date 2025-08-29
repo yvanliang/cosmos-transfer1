@@ -328,7 +328,7 @@ class GeneralDIT(nn.Module):
 
         for block in self.blocks.values():
             for layer in block.blocks:
-                if layer.block_type in ["full_attn", "fa", "cross_attn", "ca"]:
+                if layer.block_type in ["full_attn", "fa", "cross_attn", "ca", "multi_attn", "ma"]:
                     # Initialize weights for attention layers
                     torch.nn.init.xavier_uniform_(layer.block.attn.to_q[0].weight)
                     torch.nn.init.xavier_uniform_(layer.block.attn.to_k[0].weight)
@@ -676,6 +676,7 @@ class GeneralDIT(nn.Module):
         return_features_early,
         regional_contexts=None,
         region_masks=None,
+        obj_ctrl=None,
     ):
         features = []
         for name, block in self.blocks.items():
@@ -717,6 +718,8 @@ class GeneralDIT(nn.Module):
 
             if x_ctrl is not None and name in x_ctrl:
                 x = x + x_ctrl[name]
+            if obj_ctrl is not None and name in obj_ctrl:
+                x = x + obj_ctrl[name]
             # If we have all of the features, we can exit early
             if return_features_early and len(features) == len(feature_indices):
                 return features
@@ -759,6 +762,7 @@ class GeneralDIT(nn.Module):
         return_features_early,
         regional_contexts=None,
         region_masks=None,
+        obj_ctrl=None,
     ):
         x_before_gate = 0
         x_skip = rearrange(x, "T H W B D -> (T H W) B D")
@@ -807,6 +811,10 @@ class GeneralDIT(nn.Module):
                 x_ctrl_ = x_ctrl[new_name]
                 x_ctrl_ = rearrange(x_ctrl_, "T H W B D -> (T H W) B D")
                 x_skip = x_skip + x_ctrl_
+            if obj_ctrl is not None and new_name in obj_ctrl:
+                obj_ctrl_ = obj_ctrl[new_name]
+                obj_ctrl_ = rearrange(obj_ctrl_, "T H W B D -> (T H W) B D")
+                x_skip = x_skip + obj_ctrl_
             # If we have all of the features, we can exit early
             if return_features_early and len(features) == len(feature_indices):
                 return features
@@ -874,6 +882,7 @@ class GeneralDIT(nn.Module):
         scalar_feature: Optional[torch.Tensor] = None,
         data_type: Optional[DataType] = DataType.VIDEO,
         x_ctrl: Optional[dict] = None,
+        obj_ctrl: Optional[dict] = None,
         latent_condition: Optional[torch.Tensor] = None,
         latent_condition_sigma: Optional[torch.Tensor] = None,
         feature_indices: Optional[Container[int]] = None,
@@ -944,6 +953,7 @@ class GeneralDIT(nn.Module):
                 original_shape,
                 x_ctrl,
                 return_features_early,
+                obj_ctrl= obj_ctrl,
             )
 
         return self.forward_blocks_regular(
@@ -958,6 +968,7 @@ class GeneralDIT(nn.Module):
             original_shape,
             x_ctrl,
             return_features_early,
+            obj_ctrl=obj_ctrl,
         )
 
     @property

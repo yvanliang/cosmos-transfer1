@@ -16,6 +16,7 @@
 from typing import Callable, Dict, Optional, Tuple, Type, TypeVar, Union
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from megatron.core import parallel_state
 from torch import Tensor
@@ -62,6 +63,7 @@ def ctrlnet_decorator(base_class: Type[T]) -> Type[T]:
             # initialize controlnet encoder
             model = torch.nn.ModuleDict({"net": net, "conditioner": conditioner, "logvar": logvar})
             model.load_state_dict(base_model.state_dict(), strict=False)
+            model.net.net_obj.load_state_dict_from_base_model(base_model.state_dict())
 
             model.base_model = base_model
             if not config.finetune_base_model:
@@ -164,6 +166,33 @@ def video_ctrlnet_decorator(base_class: Type[T]) -> Type[T]:
             # else:
             #     raise NotImplementedError(f"{self.config.hint_key} is not implemented.")
             data_batch["hint_key"] = hint_key
+
+            # process control_input_object
+            hint_key_object = "control_input_object"
+            is_image_batch = self.is_image_batch(data_batch)
+            _data = {hint_key_object: data_batch[hint_key_object]}
+            if IS_PREPROCESSED_KEY in data_batch:
+                _data[IS_PREPROCESSED_KEY] = data_batch[IS_PREPROCESSED_KEY]
+            if not is_image_batch:
+                self._normalize_video_databatch_inplace(_data, input_key=hint_key_object)
+            # if it is an image batch, the control input is also image
+            if self.input_image_key in data_batch:
+                self._augment_image_dim_inplace(_data, input_key=hint_key_object)
+            data_batch[hint_key_object] = _data[hint_key_object]
+
+            # process masked_video
+            hint_key_masked_video = "control_input_masked_video"
+            is_image_batch = self.is_image_batch(data_batch)
+            _data = {hint_key_masked_video: data_batch[hint_key_masked_video]}
+            if IS_PREPROCESSED_KEY in data_batch:
+                _data[IS_PREPROCESSED_KEY] = data_batch[IS_PREPROCESSED_KEY]
+            if not is_image_batch:
+                self._normalize_video_databatch_inplace(_data, input_key=hint_key_masked_video)
+            # if it is an image batch, the control input is also image
+            if self.input_image_key in data_batch:
+                self._augment_image_dim_inplace(_data, input_key=hint_key_masked_video)
+            data_batch[hint_key_masked_video] = _data[hint_key_masked_video]
+
             raw_state, latent_state, condition = super().get_data_and_condition(data_batch, **kwargs)
             # if not torch.is_grad_enabled() and all(self.config.hint_mask):
             use_multicontrol = (
@@ -181,21 +210,50 @@ def video_ctrlnet_decorator(base_class: Type[T]) -> Type[T]:
                 latent_hint = torch.cat(latent_hint)
             else:
                 latent_hint = self.encode_latent(data_batch)
+            latent_hint_object = self.encode_latent(data_batch, input_key=hint_key_object)
+            latent_hint_masked_video = self.encode_latent(data_batch, input_key=hint_key_masked_video)
+
+            # process mask
+            comp_factor = self.vae.temporal_compression_factor
+            mask = rearrange(data_batch["mask"], "B C (V T) H W -> B C V T H W", V=1)
+            b, _, _, _, h, w = mask.shape
+            mask_B_C_V_0 = mask[:, :, :, :1]
+            mask_B_C_V_1T = mask[:, :, :, 1:-1:comp_factor]
+            mask_B_C_V_T = torch.cat([mask_B_C_V_0, mask_B_C_V_1T], dim=3)
+            mask = F.interpolate(
+                rearrange(mask_B_C_V_T, "B C V T H W -> (B V T) C H W").float(),
+                mode='nearest',
+                size=(h // self.vae.spatial_compression_factor,
+                      w // self.vae.spatial_compression_factor),
+            )
+            mask = rearrange(mask, '(B VT) C H W -> B C VT H W', B=b)
+            condition.condition_video_input_mask *= (1. - mask)
+            data_batch["mask"] = mask
+
             # copied from model.py
             is_image_batch = self.is_image_batch(data_batch)
             is_video_batch = not is_image_batch
             # VAE has randomness. CP/TP group should have the same encoded output.
 
             latent_hint = _broadcast(latent_hint, to_tp=True, to_cp=is_video_batch)
+            latent_hint_object = _broadcast(latent_hint_object, to_tp=True, to_cp=is_video_batch)
+            latent_hint_masked_video = _broadcast(latent_hint_masked_video, to_tp=True, to_cp=is_video_batch)
+            data_batch["mask"] = _broadcast(data_batch["mask"], to_tp=True, to_cp=is_video_batch)
+            condition = broadcast_condition(condition, to_tp=True, to_cp=is_video_batch)
 
             # add extra conditions
             data_batch["latent_hint"] = latent_hint
+            data_batch["latent_hint_object"] = latent_hint_object
+            data_batch["latent_hint_masked_video"] = latent_hint_masked_video
             setattr(condition, hint_key, latent_hint)
+            setattr(condition, hint_key_object, latent_hint_object)
+            setattr(condition, hint_key_masked_video, latent_hint_masked_video)
             setattr(condition, "base_model", self.model.base_model)
             return raw_state, latent_state, condition
 
-        def encode_latent(self, data_batch: dict, cond_mask: list = []) -> torch.Tensor:
-            x = data_batch[data_batch["hint_key"]]
+        def encode_latent(self, data_batch: dict, cond_mask: list = [], input_key: str = None) -> torch.Tensor:
+            input_key = data_batch["hint_key"] if input_key is None else input_key
+            x = data_batch[input_key]
             if torch.is_grad_enabled() and self.pixel_corruptor is not None:
                 x = self.pixel_corruptor(x)
             latent = []
@@ -744,12 +802,12 @@ class VideoDiffusionFSDPModelWithCtrl(ExtendVideoDiffusionModel):
 
 @video_ctrlnet_decorator
 @ctrlnet_decorator
-class ShortVideoDiffusionModelWithCtrl(VideoDiffusionModel):
+class ShortVideoDiffusionModelWithCtrl(ExtendVideoDiffusionModel):
     pass
 
 
 @diffusion_fsdp_class_decorator
 @video_ctrlnet_decorator
 @ctrlnet_decorator
-class ShortVideoDiffusionFSDPModelWithCtrl(VideoDiffusionModel):
+class ShortVideoDiffusionFSDPModelWithCtrl(ExtendVideoDiffusionModel):
     pass
