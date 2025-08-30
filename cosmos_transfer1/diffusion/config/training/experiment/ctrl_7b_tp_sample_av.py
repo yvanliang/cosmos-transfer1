@@ -33,6 +33,7 @@ from cosmos_transfer1.diffusion.datasets.example_transfer_dataset import AVTrans
 from cosmos_transfer1.diffusion.inference.inference_utils import default_model_names
 from cosmos_transfer1.diffusion.training.models.model_ctrl import (  # this one has training support
     ShortVideoDiffusionFSDPModelWithCtrl,
+    ShortVideoDiffusionModelWithCtrl,
     VideoDiffusionModelWithCtrl,
 )
 from cosmos_transfer1.diffusion.training.networks.general_dit import GeneralDIT
@@ -47,6 +48,11 @@ num_control_blocks = 3
 num_control_blocks_object = 4
 ckpt_root = "checkpoints/"
 data_root = "/data/lyy_dataset/waymo_transfer/training"
+
+fsdp_enabled = True
+tensor_model_parallel_size = 4
+sharding_group_size = 1
+sharding_strategy = "full"
 
 
 def make_ctrlnet_config(
@@ -90,7 +96,7 @@ def make_ctrlnet_config(
                 {"override /hint_key": hint_key},
                 {"override /callbacks": "basic"},
                 {"override /checkpoint": "local"},
-                {"override /ckpt_klass": "fsdp"},
+                {"override /ckpt_klass": "fsdp" if fsdp_enabled else "fast_tp"},
                 "_self_",
             ],
             job=dict(group="CTRL_7Bv1_sampleAV", project=job_project, name=job_name),
@@ -110,7 +116,7 @@ def make_ctrlnet_config(
                 keys_not_to_resume=[],
             ),
             trainer=dict(
-                distributed_parallelism="fsdp",
+                distributed_parallelism="fsdp" if fsdp_enabled else "ddp",
                 logging_iter=50,
                 max_iter=999_999_999,
                 callbacks=dict(
@@ -119,8 +125,8 @@ def make_ctrlnet_config(
                 timestamp_seed=True,  # important for dataver dataloader!!!
             ),
             model_parallel=dict(
-                tensor_model_parallel_size=4,
-                sequence_parallel=True,
+                tensor_model_parallel_size=tensor_model_parallel_size,
+                sequence_parallel=True if tensor_model_parallel_size > 1 else False,
                 bf16=True,
                 enable_autocast=True,
                 autocast_dtype="bf16",
@@ -129,11 +135,11 @@ def make_ctrlnet_config(
                 cpu_offloading_activations=False,
             ),
             model=dict(
-                fsdp_enabled=True,
+                fsdp_enabled=fsdp_enabled,
                 fsdp=dict(
                     checkpoint=True,
-                    sharding_group_size=1,
-                    sharding_strategy="full",
+                    sharding_group_size=sharding_group_size,
+                    sharding_strategy=sharding_strategy,
                 ),
                 ema=dict(enabled=True),
                 context_parallel_size=1,
@@ -174,6 +180,7 @@ def make_ctrlnet_config(
                     extra_per_block_abs_pos_emb=True,
                     pos_emb_learnable=True,
                     extra_per_block_abs_pos_emb_type="learnable",
+                    # use_checkpoint=True,
                 ),
                 adjust_video_noise=True,
                 net_ctrl=dict(
@@ -194,7 +201,7 @@ def make_ctrlnet_config(
                     pixel_chunk_duration=num_frames,
                 ),
             ),
-            model_obj=L(ShortVideoDiffusionFSDPModelWithCtrl)(fsdp_checkpointer=None),
+            model_obj = L(ShortVideoDiffusionFSDPModelWithCtrl)(fsdp_checkpointer=None) if fsdp_enabled else L(ShortVideoDiffusionModelWithCtrl)(),
             dataloader_train=L(DataLoader)(
                 dataset=example_multiview_dataset_waymo,
                 sampler=L(get_sampler)(dataset=example_multiview_dataset_waymo),
