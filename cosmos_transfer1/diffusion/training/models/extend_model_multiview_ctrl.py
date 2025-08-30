@@ -29,7 +29,7 @@ from cosmos_transfer1.diffusion.inference.inference_utils import (
     split_video_into_patches,
 )
 from cosmos_transfer1.diffusion.module.parallel import cat_outputs_cp, split_inputs_cp
-from cosmos_transfer1.diffusion.training.models.extend_model_multiview import FSDPExtendDiffusionModel
+from cosmos_transfer1.diffusion.training.models.extend_model_multiview import MultiviewExtendDiffusionModel
 from cosmos_transfer1.diffusion.training.models.model import DiffusionModel as VideoDiffusionModel
 from cosmos_transfer1.diffusion.training.models.model import _broadcast, broadcast_condition
 from cosmos_transfer1.diffusion.training.models.model_image import diffusion_fsdp_class_decorator
@@ -39,7 +39,7 @@ from cosmos_transfer1.utils.lazy_config import instantiate as lazy_instantiate
 IS_PREPROCESSED_KEY = "is_preprocessed"
 
 
-class MultiVideoDiffusionModelWithCtrl(FSDPExtendDiffusionModel):
+class MultiVideoDiffusionModelWithCtrl(MultiviewExtendDiffusionModel):
     def __init__(self, config, fsdp_checkpointer=None):
         self.pixel_corruptor = None
         if fsdp_checkpointer is not None:

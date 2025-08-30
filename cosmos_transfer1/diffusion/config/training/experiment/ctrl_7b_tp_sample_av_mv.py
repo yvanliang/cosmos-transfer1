@@ -55,6 +55,11 @@ num_control_blocks_object = 1
 ckpt_root = "checkpoints/"
 data_root = "/data/lyy_dataset/waymo_transfer/training"
 
+fsdp_enabled = True
+tensor_model_parallel_size = 4
+sharding_group_size = 1
+sharding_strategy = "full"
+
 t2w_mv_model_names = {
     "hdmap": SV2MV_t2w_HDMAP2WORLD_CONTROLNET_7B_CHECKPOINT_PATH,
     "lidar": SV2MV_t2w_LIDAR2WORLD_CONTROLNET_7B_CHECKPOINT_PATH,
@@ -132,7 +137,7 @@ def make_ctrlnet_config(
                 {"override /hint_key": hint_key},
                 {"override /callbacks": "basic"},
                 {"override /checkpoint": "local"},
-                {"override /ckpt_klass": "fsdp"},
+                {"override /ckpt_klass": "fsdp" if fsdp_enabled else "fast_tp"},
                 "_self_",
             ],
             job=dict(group="CTRL_7Bv1_sampleAV", project=job_project, name=job_name),
@@ -152,7 +157,7 @@ def make_ctrlnet_config(
                 keys_not_to_resume=[],
             ),
             trainer=dict(
-                distributed_parallelism="fsdp",
+                distributed_parallelism="fsdp" if fsdp_enabled else "ddp",
                 logging_iter=50,
                 max_iter=999_999_999,
                 callbacks=dict(
@@ -161,8 +166,8 @@ def make_ctrlnet_config(
                 timestamp_seed=True,  # important for dataver dataloader!!!
             ),
             model_parallel=dict(
-                tensor_model_parallel_size=4,
-                sequence_parallel=True,
+                tensor_model_parallel_size=tensor_model_parallel_size,
+                sequence_parallel=True if tensor_model_parallel_size > 1 else False,
                 bf16=True,
                 enable_autocast=True,
                 autocast_dtype="bf16",
@@ -171,11 +176,11 @@ def make_ctrlnet_config(
                 cpu_offloading_activations=False,
             ),
             model=dict(
-                fsdp_enabled=True,
+                fsdp_enabled=fsdp_enabled,
                 fsdp=dict(
                     checkpoint=True,
-                    sharding_group_size=1,
-                    sharding_strategy="full",
+                    sharding_group_size=sharding_group_size,
+                    sharding_strategy=sharding_strategy,
                 ),
                 ema=dict(enabled=False),
                 n_views=3,
@@ -215,6 +220,7 @@ def make_ctrlnet_config(
                     pos_emb_learnable=True,
                     extra_per_block_abs_pos_emb_type="learnable",
                     num_blocks=num_blocks,
+                    # use_checkpoint=True,
                 ),
                 adjust_video_noise=True,
                 net_ctrl=dict(
@@ -239,7 +245,7 @@ def make_ctrlnet_config(
                     pixel_chunk_duration=num_frames,
                 ),
             ),
-            model_obj=L(MultiVideoDiffusionModelWithCtrl)(),
+            model_obj=L(FSDPMultiVideoDiffusionModelWithCtrl)(fsdp_checkpointer=None) if fsdp_enabled else L(MultiVideoDiffusionModelWithCtrl)(),
             dataloader_train=L(DataLoader)(
                 dataset=example_multiview_dataset_waymo,
                 sampler=L(get_sampler)(dataset=example_multiview_dataset_waymo),

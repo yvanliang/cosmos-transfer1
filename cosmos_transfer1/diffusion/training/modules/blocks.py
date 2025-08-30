@@ -578,21 +578,17 @@ class MultiAttn(VideoAttn):
 
         # --- 1. 从 Batch 维度拆分出 x 和 hint ---
         if self.x_format == "BTHWD":
-            # Input shape: (B_doubled, slice_len, 1, 1, D) after scatter
-            B, S_slice, _, _, D = x.shape
-
-            # Reshape for attention: (B*slice_len, 1, D) -> (B, slice_len, D)
-            x_reshaped = x.view(B, S_slice, D)
-            hint_reshaped = hint.view(B, S_slice, D)
+            # Generic handling: flatten (T, H, W) to sequence, works for both tp=1 and tp>1
+            B, T, H, W, D = x.shape
+            x_reshaped = rearrange(x, "b t h w d -> b (t h w) d")
+            hint_reshaped = rearrange(hint, "b t h w d -> b (t h w) d")
             sequence_dim = 1
 
         elif self.x_format == "THWBD":
-            # Input shape: (slice_len, 1, 1, B_doubled, D) after scatter
-            S_slice, _, _, B, D = x.shape
-
-            # Reshape for attention: (slice_len, 1, 1, B, D) -> (slice_len, B, D)
-            x_reshaped = x.view(S_slice, B, D)
-            hint_reshaped = hint.view(S_slice, B, D)
+            # Generic handling: flatten (T, H, W) to sequence, works for both tp=1 and tp>1
+            T, H, W, B, D = x.shape
+            x_reshaped = rearrange(x, "t h w b d -> (t h w) b d")
+            hint_reshaped = rearrange(hint, "t h w b d -> (t h w) b d")
             sequence_dim = 0
         else:
             raise NotImplementedError(f"Unsupported x_format: {self.x_format}")
@@ -615,14 +611,14 @@ class MultiAttn(VideoAttn):
         x_out_reshaped, hint_out_reshaped = torch.chunk(attn_output, 2, dim=sequence_dim)
 
         if self.x_format == "BTHWD":
-            # (B, slice_len, D) -> (B, slice_len, 1, 1, D)
-            x_out = x_out_reshaped.view(B, S_slice, 1, 1, D)
-            hint_out = hint_out_reshaped.view(B, S_slice, 1, 1, D)
+            # (B, THW, D) -> (B, T, H, W, D)
+            x_out = rearrange(x_out_reshaped, "b (t h w) d -> b t h w d", t=T, h=H, w=W)
+            hint_out = rearrange(hint_out_reshaped, "b (t h w) d -> b t h w d", t=T, h=H, w=W)
 
         elif self.x_format == "THWBD":
-            # (slice_len, B, D) -> (slice_len, 1, 1, B, D)
-            x_out = x_out_reshaped.view(S_slice, 1, 1, B, D)
-            hint_out = hint_out_reshaped.view(S_slice, 1, 1, B, D)
+            # (THW, B, D) -> (T, H, W, B, D)
+            x_out = rearrange(x_out_reshaped, "(t h w) b d -> t h w b d", t=T, h=H, w=W)
+            hint_out = rearrange(hint_out_reshaped, "(t h w) b d -> t h w b d", t=T, h=H, w=W)
 
         return x_out, hint_out
 
